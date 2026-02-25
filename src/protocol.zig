@@ -27,6 +27,7 @@ pub const Error = error{
     UnknownProcedureStatusTag,
     UnknownRowSizeHintTag,
     UnknownTableUpdateRowsTag,
+    InvalidOptionTag,
 } || bsatn.Error || std.mem.Allocator.Error;
 
 // ============================================================
@@ -175,7 +176,20 @@ pub const ClientMessage = union(enum) {
 /// Row size hint for BsatnRowList.
 pub const RowSizeHint = union(enum) {
     fixed_size: u16,
-    row_offsets: []const u64,
+    /// Raw little-endian u64 offset bytes from the frame buffer (no allocation).
+    /// Use `getOffset(i)` to read individual offsets.
+    row_offsets: RowOffsets,
+
+    pub const RowOffsets = struct {
+        count: u32,
+        /// Raw bytes: count * 8 bytes of little-endian u64s
+        raw_bytes: []const u8,
+
+        pub fn getOffset(self: RowOffsets, i: usize) u64 {
+            const start = i * 8;
+            return std.mem.readInt(u64, self.raw_bytes[start..][0..8], .little);
+        }
+    };
 };
 
 /// A list of BSATN-encoded rows with size hint.
@@ -418,25 +432,24 @@ pub const ServerMessage = union(enum) {
         const rows = try allocator.alloc(TableRows, count);
         for (rows) |*row| {
             row.table_name = try dec.decodeString();
-            row.rows = try decodeBsatnRowList(dec);
+            row.rows = try decodeBsatnRowList(allocator, dec);
         }
         return rows;
     }
 
-    fn decodeBsatnRowList(dec: *Decoder) Error!BsatnRowList {
+    fn decodeBsatnRowList(allocator: std.mem.Allocator, dec: *Decoder) Error!BsatnRowList {
+        _ = allocator;
         const hint_tag = try dec.decodeU8();
         const size_hint: RowSizeHint = switch (hint_tag) {
             0 => .{ .fixed_size = try dec.decodeU16() },
             1 => blk: {
-                // We can't allocate here without an allocator, so read the offsets
-                // as a slice into the decoder buffer. This is fine since row_offsets
-                // are only used for splitting and the data lives as long as the frame.
                 const offset_count = try dec.decodeU32();
-                // Skip past the offsets (each u64 = 8 bytes) - we'll decode on demand
-                const offset_bytes = try dec.readBytes(offset_count * 8);
-                _ = offset_bytes;
-                // For now, represent as fixed_size 0 (callers use rows_data directly)
-                break :blk .{ .fixed_size = 0 };
+                // Read raw offset bytes directly from the frame buffer (zero-copy)
+                const raw_bytes = try dec.readBytes(offset_count * 8);
+                break :blk .{ .row_offsets = .{
+                    .count = offset_count,
+                    .raw_bytes = raw_bytes,
+                } };
             },
             else => return Error.UnknownRowSizeHintTag,
         };
@@ -459,10 +472,10 @@ pub const ServerMessage = union(enum) {
                     const row_tag = try dec.decodeU8();
                     row.* = switch (row_tag) {
                         0 => .{ .persistent = .{
-                            .inserts = try decodeBsatnRowList(dec),
-                            .deletes = try decodeBsatnRowList(dec),
+                            .inserts = try decodeBsatnRowList(allocator, dec),
+                            .deletes = try decodeBsatnRowList(allocator, dec),
                         } },
-                        1 => .{ .event = try decodeBsatnRowList(dec) },
+                        1 => .{ .event = try decodeBsatnRowList(allocator, dec) },
                         else => return Error.UnknownTableUpdateRowsTag,
                     };
                 }
@@ -712,6 +725,39 @@ test "ServerMessage decode SubscribeApplied" {
     try std.testing.expectEqualStrings("players", sa.rows[0].table_name);
     try std.testing.expectEqual(@as(u16, 4), sa.rows[0].rows.size_hint.fixed_size);
     try std.testing.expectEqualSlices(u8, &row_data, sa.rows[0].rows.rows_data);
+}
+
+test "ServerMessage decode SubscribeApplied with row_offsets" {
+    const allocator = std.testing.allocator;
+    var enc = Encoder.init();
+    defer enc.deinit(allocator);
+
+    try enc.encodeU8(allocator, 1); // SubscribeApplied tag
+    try enc.encodeU32(allocator, 10); // request_id
+    try enc.encodeU32(allocator, 20); // query_set_id
+    // QueryRows: 1 table
+    try enc.encodeU32(allocator, 1);
+    try enc.encodeString(allocator, "users");
+    // BsatnRowList with RowOffsets hint (tag=1)
+    try enc.encodeU8(allocator, 1); // row_offsets tag
+    try enc.encodeU32(allocator, 2); // 2 offsets
+    try enc.encodeU64(allocator, 0); // offset 0
+    try enc.encodeU64(allocator, 4); // offset 4
+    // rows_data: two 4-byte "rows"
+    try enc.encodeBytes(allocator, &[_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44 });
+
+    const msg = try ServerMessage.decode(allocator, enc.writtenSlice());
+    defer allocator.free(msg.subscribe_applied.rows);
+    const sa = msg.subscribe_applied;
+    try std.testing.expectEqual(@as(u32, 10), sa.request_id);
+
+    const hint = sa.rows[0].rows.size_hint;
+    try std.testing.expect(hint == .row_offsets);
+    const offsets = hint.row_offsets;
+    try std.testing.expectEqual(@as(u32, 2), offsets.count);
+    try std.testing.expectEqual(@as(u64, 0), offsets.getOffset(0));
+    try std.testing.expectEqual(@as(u64, 4), offsets.getOffset(1));
+    try std.testing.expectEqual(@as(usize, 8), sa.rows[0].rows.rows_data.len);
 }
 
 test "ServerMessage decode TransactionUpdate" {

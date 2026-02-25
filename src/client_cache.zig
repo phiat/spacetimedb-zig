@@ -225,56 +225,58 @@ pub const ClientCache = struct {
         for (update.rows) |row_update| {
             switch (row_update) {
                 .persistent => |p| {
-                    // Process deletes first, collecting deleted rows for update detection
-                    var deleted_pks = std.ArrayListUnmanaged(PrimaryKey){};
-                    defer deleted_pks.deinit(self.allocator);
-                    var deleted_rows = std.ArrayListUnmanaged(Row){};
-                    defer deleted_rows.deinit(self.allocator);
+                    // Process deletes first, collecting deleted rows for O(1) update detection
+                    var deleted_map = RowMap{};
+                    defer {
+                        // Free any remaining (unmatched) entries
+                        var dit = deleted_map.iterator();
+                        while (dit.next()) |entry| {
+                            self.allocator.free(entry.key_ptr.bytes);
+                            entry.value_ptr.deinit(self.allocator);
+                        }
+                        deleted_map.deinit(self.allocator);
+                    }
 
                     const del_decoded = try row_decoder.decodeRowList(self.allocator, p.deletes, columns);
                     defer self.allocator.free(del_decoded);
+                    var del_processed: usize = 0;
+                    errdefer for (del_decoded[del_processed..]) |*r| r.deinit(self.allocator);
                     for (del_decoded) |row| {
                         const pk = try self.extractPk(row, store.pk_col_indices);
+                        del_processed += 1;
                         if (store.rows.fetchRemove(pk)) |kv| {
-                            try deleted_pks.append(self.allocator, pk);
-                            try deleted_rows.append(self.allocator, kv.value);
+                            try deleted_map.put(self.allocator, pk, kv.value);
                         } else {
-                            // Row wasn't in cache, free the decoded row
                             row.deinit(self.allocator);
                             self.allocator.free(pk.bytes);
                         }
                     }
 
-                    // Process inserts, checking against deleted PKs for updates
+                    // Process inserts, checking against deleted map for updates (O(1) per lookup)
                     const ins_decoded = try row_decoder.decodeRowList(self.allocator, p.inserts, columns);
                     defer self.allocator.free(ins_decoded);
+                    var ins_processed: usize = 0;
+                    errdefer for (ins_decoded[ins_processed..]) |*r| r.deinit(self.allocator);
                     for (ins_decoded) |row| {
                         const pk = try self.extractPk(row, store.pk_col_indices);
+                        ins_processed += 1;
 
-                        // Check if this is an update (same PK was just deleted)
-                        var was_update = false;
-                        for (deleted_pks.items, 0..) |dpk, di| {
-                            if (dpk.eql(pk)) {
-                                // This is an update - insert new row
-                                try store.rows.put(self.allocator, pk, row);
-                                const stored = store.rows.getPtr(pk).?;
-                                // We need to keep old_row alive until callback processes it
-                                // Store as update change
-                                try changes.append(self.allocator, .{ .update = .{
-                                    .table_name = update.table_name,
-                                    .old_row = &deleted_rows.items[di],
-                                    .new_row = stored,
-                                } });
-                                was_update = true;
-                                // Free the old PK bytes since we have a new copy
-                                self.allocator.free(dpk.bytes);
-                                _ = deleted_pks.orderedRemove(di);
-                                _ = deleted_rows.orderedRemove(di);
-                                break;
-                            }
-                        }
-
-                        if (!was_update) {
+                        if (deleted_map.fetchRemove(pk)) |old_entry| {
+                            // Update: same PK was deleted then re-inserted
+                            try store.rows.put(self.allocator, pk, row);
+                            const stored = store.rows.getPtr(pk).?;
+                            // Store old row for callback, then append change
+                            // Old row ownership: we need it alive for the callback.
+                            // Allocate a copy since deleted_map entry is now gone.
+                            const old_row_ptr = try self.allocator.create(Row);
+                            old_row_ptr.* = old_entry.value;
+                            try changes.append(self.allocator, .{ .update = .{
+                                .table_name = update.table_name,
+                                .old_row = old_row_ptr,
+                                .new_row = stored,
+                            } });
+                            self.allocator.free(old_entry.key.bytes);
+                        } else {
                             try store.rows.put(self.allocator, pk, row);
                             const stored = store.rows.getPtr(pk).?;
                             try changes.append(self.allocator, .{ .insert = .{
@@ -285,8 +287,9 @@ pub const ClientCache = struct {
                     }
 
                     // Remaining deletes (not matched by inserts) are pure deletes
-                    for (deleted_pks.items, deleted_rows.items) |dpk, *drow| {
-                        _ = dpk;
+                    // These will be cleaned up by the defer above after callback dispatch
+                    var rem_it = deleted_map.valueIterator();
+                    while (rem_it.next()) |drow| {
                         try changes.append(self.allocator, .{ .delete = .{
                             .table_name = update.table_name,
                             .row = drow,
@@ -403,11 +406,18 @@ test "cache apply inserts via subscribe" {
     const all_data = try std.mem.concat(allocator, u8, &.{ row1, row2 });
     defer allocator.free(all_data);
 
-    const offsets = [_]u64{ 0, row1.len };
+    const offset_vals = [_]u64{ 0, row1.len };
+    var offset_bytes: [2 * 8]u8 = undefined;
+    for (offset_vals, 0..) |val, oi| {
+        std.mem.writeInt(u64, offset_bytes[oi * 8 ..][0..8], val, .little);
+    }
     const table_rows = [_]TableRows{.{
         .table_name = "users",
         .rows = .{
-            .size_hint = .{ .row_offsets = &offsets },
+            .size_hint = .{ .row_offsets = .{
+                .count = 2,
+                .raw_bytes = &offset_bytes,
+            } },
             .rows_data = all_data,
         },
     }};
@@ -484,11 +494,18 @@ test "find by primary key" {
     const all_data = try std.mem.concat(allocator, u8, &.{ row1, row2 });
     defer allocator.free(all_data);
 
-    const offsets = [_]u64{ 0, row1.len };
+    const offset_vals = [_]u64{ 0, row1.len };
+    var offset_bytes: [2 * 8]u8 = undefined;
+    for (offset_vals, 0..) |val, oi| {
+        std.mem.writeInt(u64, offset_bytes[oi * 8 ..][0..8], val, .little);
+    }
     const table_rows = [_]TableRows{.{
         .table_name = "users",
         .rows = .{
-            .size_hint = .{ .row_offsets = &offsets },
+            .size_hint = .{ .row_offsets = .{
+                .count = 2,
+                .raw_bytes = &offset_bytes,
+            } },
             .rows_data = all_data,
         },
     }};

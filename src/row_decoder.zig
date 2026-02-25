@@ -50,9 +50,14 @@ pub fn decodeRowList(
     defer allocator.free(row_binaries);
 
     const rows = try allocator.alloc(Row, row_binaries.len);
-    errdefer allocator.free(rows);
+    var decoded_count: usize = 0;
+    errdefer {
+        for (rows[0..decoded_count]) |*r| r.deinit(allocator);
+        allocator.free(rows);
+    }
     for (row_binaries, 0..) |row_bin, i| {
         rows[i] = try decodeRow(allocator, row_bin, columns);
+        decoded_count += 1;
     }
     return rows;
 }
@@ -65,11 +70,16 @@ pub fn decodeRow(
 ) DecodeError!Row {
     var dec = Decoder.init(data);
     const fields = try allocator.alloc(AlgebraicValue.FieldValue, columns.len);
-    errdefer allocator.free(fields);
+    var decoded_fields: usize = 0;
+    errdefer {
+        for (fields[0..decoded_fields]) |*f| f.value.deinit(allocator);
+        allocator.free(fields);
+    }
 
     for (columns, 0..) |col, i| {
         const value = try dec.decodeValue(allocator, col.type);
         fields[i] = .{ .name = col.name, .value = value };
+        decoded_fields += 1;
     }
 
     return .{ .fields = fields };
@@ -83,7 +93,7 @@ fn splitRows(
 ) std.mem.Allocator.Error![]const []const u8 {
     return switch (size_hint) {
         .fixed_size => |size| splitFixed(allocator, data, size),
-        .row_offsets => |offsets| splitByOffsets(allocator, data, offsets),
+        .row_offsets => |offsets| splitByRowOffsets(allocator, data, offsets),
     };
 }
 
@@ -104,19 +114,19 @@ fn splitFixed(
     return result;
 }
 
-fn splitByOffsets(
+fn splitByRowOffsets(
     allocator: std.mem.Allocator,
     data: []const u8,
-    offsets: []const u64,
+    offsets: RowSizeHint.RowOffsets,
 ) std.mem.Allocator.Error![]const []const u8 {
-    if (offsets.len == 0) {
+    if (offsets.count == 0) {
         return try allocator.alloc([]const u8, 0);
     }
-    const result = try allocator.alloc([]const u8, offsets.len);
-    for (offsets, 0..) |offset, i| {
-        const start: usize = @intCast(offset);
-        const end: usize = if (i + 1 < offsets.len)
-            @intCast(offsets[i + 1])
+    const result = try allocator.alloc([]const u8, offsets.count);
+    for (0..offsets.count) |i| {
+        const start: usize = @intCast(offsets.getOffset(i));
+        const end: usize = if (i + 1 < offsets.count)
+            @intCast(offsets.getOffset(i + 1))
         else
             data.len;
         result[i] = data[start..end];
@@ -238,9 +248,17 @@ test "decode row_list with row_offsets" {
     const all_data = try std.mem.concat(allocator, u8, &.{ row1, row2, row3 });
     defer allocator.free(all_data);
 
-    const offsets = [_]u64{ 0, row1.len, row1.len + row2.len };
+    // Build raw offset bytes (little-endian u64s)
+    const offset_vals = [_]u64{ 0, row1.len, row1.len + row2.len };
+    var offset_bytes: [3 * 8]u8 = undefined;
+    for (offset_vals, 0..) |val, i| {
+        std.mem.writeInt(u64, offset_bytes[i * 8 ..][0..8], val, .little);
+    }
     const row_list = BsatnRowList{
-        .size_hint = .{ .row_offsets = &offsets },
+        .size_hint = .{ .row_offsets = .{
+            .count = 3,
+            .raw_bytes = &offset_bytes,
+        } },
         .rows_data = all_data,
     };
 

@@ -36,11 +36,13 @@ pub const Schema = struct {
     reducers: []const ReducerDef,
     typespace: []const *AlgebraicType,
     allocator: std.mem.Allocator,
+    /// Owns the JSON parse tree; string slices in tables/reducers point into this.
+    json_parsed: ?std.json.Parsed(std.json.Value) = null,
 
     pub fn deinit(self: *const Schema) void {
-        // All memory was allocated from the arena, which the caller manages.
-        // This is a no-op if using an arena allocator (recommended).
-        _ = self;
+        if (self.json_parsed) |parsed| {
+            parsed.deinit();
+        }
     }
 
     /// Find a table by name.
@@ -78,7 +80,9 @@ pub fn parse(allocator: std.mem.Allocator, json_str: []const u8) SchemaError!Sch
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch
         return SchemaError.InvalidJson;
 
-    return parseValue(allocator, parsed.value);
+    var result = try parseValue(allocator, parsed.value);
+    result.json_parsed = parsed;
+    return result;
 }
 
 /// Parse from an already-parsed JSON value.
@@ -349,6 +353,9 @@ fn parseReducer(allocator: std.mem.Allocator, val: std.json.Value) SchemaError!R
 // ============================================================
 
 /// Resolve refs in a heap-allocated AlgebraicType (used for typespace entries).
+/// SAFETY: @constCast is used because inner pointers (array, option, product, sum)
+/// are declared *const in AlgebraicType for consumer safety, but the underlying memory
+/// is always heap-allocated during schema parsing, so mutation during initialization is safe.
 fn resolveRefsInPlace(t: *AlgebraicType, typespace: []const *AlgebraicType) SchemaError!void {
     switch (t.*) {
         .ref => |idx| {

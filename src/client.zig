@@ -173,7 +173,7 @@ pub const SpacetimeClient = struct {
     schema: ?Schema,
     handler: EventHandler,
     /// Track which query_set_ids map to which subscriptions.
-    active_subscriptions: std.AutoHashMapUnmanaged(u32, []const []const u8),
+    active_subscriptions: std.AutoHashMapUnmanaged(u32, void),
 
     /// Create a builder for ergonomic client construction.
     pub fn builder(allocator: std.mem.Allocator) ClientBuilder {
@@ -213,11 +213,14 @@ pub const SpacetimeClient = struct {
     pub fn deinit(self: *SpacetimeClient) void {
         self.connection.deinit();
         self.cache.deinit();
+        if (self.schema) |*s| s.deinit();
         self.active_subscriptions.deinit(self.allocator);
     }
 
     /// Set the schema (typically after HTTP fetch).
+    /// Frees the previous schema if one was set.
     pub fn setSchema(self: *SpacetimeClient, s: Schema) void {
+        if (self.schema) |*old| old.deinit();
         self.schema = s;
         // Reinitialize cache with new schema
         self.cache.deinit();
@@ -237,7 +240,7 @@ pub const SpacetimeClient = struct {
     /// Subscribe to SQL queries. Returns the query_set_id.
     pub fn subscribe(self: *SpacetimeClient, queries: []const []const u8) !u32 {
         const result = try self.connection.subscribe(queries);
-        try self.active_subscriptions.put(self.allocator, result.query_set_id, queries);
+        try self.active_subscriptions.put(self.allocator, result.query_set_id, {});
         return result.query_set_id;
     }
 
@@ -326,7 +329,7 @@ pub const SpacetimeClient = struct {
             return err;
         };
         if (frame) |data| {
-            defer self.allocator.free(@constCast(data));
+            defer self.allocator.free(data);
             self.processFrame(data) catch |err| {
                 self.handler.onError(@errorName(err));
                 return err;
@@ -350,7 +353,7 @@ pub const SpacetimeClient = struct {
                 return;
             };
             if (frame) |data| {
-                defer self.allocator.free(@constCast(data));
+                defer self.allocator.free(data);
                 self.processFrame(data) catch |err| {
                     self.handler.onError(@errorName(err));
                     continue;
@@ -637,7 +640,7 @@ test "SpacetimeClient subscribe tracking" {
         fn sendFn(self: *@This(), data: []const u8) !void {
             try self.sent.append(self.alloc, try self.alloc.dupe(u8, data));
         }
-        fn recvFn(_: *@This()) !?[]const u8 {
+        fn recvFn(_: *@This()) !?[]u8 {
             return null;
         }
         fn closeFn(_: *@This()) void {}
@@ -680,7 +683,7 @@ test "frameTick returns false when no data" {
             };
         }
         fn sendFn(_: *@This(), _: []const u8) !void {}
-        fn recvFn(_: *@This()) !?[]const u8 {
+        fn recvFn(_: *@This()) !?[]u8 {
             return null; // no data available
         }
         fn closeFn(_: *@This()) void {}
@@ -724,7 +727,7 @@ test "frameTick processes a frame" {
     // frame_data will be freed by frameTick
 
     const MockWsTransport = struct {
-        frame: ?[]const u8,
+        frame: ?[]u8,
 
         fn transport(self: *@This()) websocket.Transport {
             return .{
@@ -738,7 +741,7 @@ test "frameTick processes a frame" {
             };
         }
         fn sendFn(_: *@This(), _: []const u8) !void {}
-        fn recvFn(self: *@This()) !?[]const u8 {
+        fn recvFn(self: *@This()) !?[]u8 {
             if (self.frame) |f| {
                 self.frame = null;
                 return f;

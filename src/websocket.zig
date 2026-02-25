@@ -73,7 +73,8 @@ pub const Transport = struct {
 
     pub const VTable = struct {
         send: *const fn (ptr: *anyopaque, data: []const u8) anyerror!void,
-        receive: *const fn (ptr: *anyopaque) anyerror!?[]const u8,
+        /// Returns owned mutable data. Caller must free with the transport's allocator.
+        receive: *const fn (ptr: *anyopaque) anyerror!?[]u8,
         close: *const fn (ptr: *anyopaque) void,
         isOpen: *const fn (ptr: *anyopaque) bool,
     };
@@ -82,7 +83,7 @@ pub const Transport = struct {
         return self.vtable.send(self.ptr, data);
     }
 
-    pub fn receive(self: Transport) !?[]const u8 {
+    pub fn receive(self: Transport) !?[]u8 {
         return self.vtable.receive(self.ptr);
     }
 
@@ -387,13 +388,12 @@ pub const WsTransport = struct {
         try self.client.writeBin(mutable);
     }
 
-    fn receiveImpl(self: *WsTransport) !?[]const u8 {
+    fn receiveImpl(self: *WsTransport) !?[]u8 {
         const message = (try self.client.read()) orelse return null;
         defer self.client.done(message);
 
         switch (message.type) {
             .binary => {
-                // Copy the data since the reader buffer is reused
                 return try self.allocator.dupe(u8, message.data);
             },
             .text => {
@@ -502,9 +502,11 @@ const MockTransport = struct {
         try self.sent_data.append(self.allocator, copy);
     }
 
-    fn receiveFn(self: *MockTransport) !?[]const u8 {
+    fn receiveFn(self: *MockTransport) !?[]u8 {
         if (self.receive_queue.items.len > 0) {
-            return self.receive_queue.orderedRemove(0);
+            // Return owned copy — caller frees
+            const data = self.receive_queue.orderedRemove(0);
+            return try self.allocator.dupe(u8, data);
         }
         return null;
     }

@@ -138,14 +138,6 @@ pub const AlgebraicValue = union(enum) {
     }
 };
 
-/// Size hint for how to split concatenated BSATN row data.
-pub const RowSizeHint = union(enum) {
-    /// All rows have this fixed byte size.
-    fixed_size: u16,
-    /// Byte offsets where each row starts within the data.
-    row_offsets: []const u64,
-};
-
 /// Identity: 256-bit public identifier for a SpacetimeDB client.
 pub const Identity = [32]u8;
 
