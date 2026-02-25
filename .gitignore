@@ -1,0 +1,21 @@
+# Beads issue tracker
+.beads/
+
+# Claude Code memory
+.claude/
+
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
