@@ -491,6 +491,7 @@ pub const ServerMessage = union(enum) {
     fn decodeQueryRows(allocator: std.mem.Allocator, dec: *Decoder) Error![]const TableRows {
         const count = try dec.decodeU32();
         const rows = try allocator.alloc(TableRows, count);
+        errdefer allocator.free(rows);
         for (rows) |*row| {
             row.table_name = try dec.decodeString();
             row.rows = try decodeBsatnRowList(allocator, dec);
@@ -521,14 +522,17 @@ pub const ServerMessage = union(enum) {
     fn decodeQuerySetUpdates(allocator: std.mem.Allocator, dec: *Decoder) Error![]const QuerySetUpdate {
         const count = try dec.decodeU32();
         const updates = try allocator.alloc(QuerySetUpdate, count);
+        errdefer allocator.free(updates);
         for (updates) |*update| {
             update.query_set_id = try dec.decodeU32();
             const table_count = try dec.decodeU32();
             const tables = try allocator.alloc(TableUpdate, table_count);
+            errdefer allocator.free(tables);
             for (tables) |*table| {
                 table.table_name = try dec.decodeString();
                 const row_count = try dec.decodeU32();
                 const rows = try allocator.alloc(TableUpdateRows, row_count);
+                errdefer allocator.free(rows);
                 for (rows) |*row| {
                     const row_tag = try dec.decodeU8();
                     row.* = switch (row_tag) {

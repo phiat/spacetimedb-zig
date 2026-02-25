@@ -55,13 +55,35 @@ pub const RowChange = union(enum) {
     },
     delete: struct {
         table_name: []const u8,
+        /// Heap-allocated copy — owned by the changes list, freed by freeChanges.
         row: *const Row,
     },
     update: struct {
         table_name: []const u8,
+        /// Heap-allocated copy — owned by the changes list, freed by freeChanges.
         old_row: *const Row,
         new_row: *const Row,
     },
+
+    /// Free a changes list returned by applySubscribeApplied/applyTransactionUpdate.
+    /// This frees heap-allocated old_row (updates) and row (deletes) copies.
+    /// Insert rows point into the cache and are NOT freed here.
+    pub fn freeChanges(allocator: std.mem.Allocator, changes: []const RowChange) void {
+        for (changes) |change| {
+            switch (change) {
+                .delete => |d| {
+                    @constCast(d.row).deinit(allocator);
+                    allocator.destroy(@constCast(d.row));
+                },
+                .update => |u| {
+                    @constCast(u.old_row).deinit(allocator);
+                    allocator.destroy(@constCast(u.old_row));
+                },
+                .insert => {},
+            }
+        }
+        allocator.free(changes);
+    }
 };
 
 /// Per-table storage.
@@ -228,7 +250,23 @@ pub const ClientCache = struct {
         query_sets: []const QuerySetUpdate,
     ) ![]RowChange {
         var changes = std.ArrayListUnmanaged(RowChange){};
-        errdefer changes.deinit(self.allocator);
+        errdefer {
+            // Free heap-allocated row copies in delete/update changes
+            for (changes.items) |change| {
+                switch (change) {
+                    .delete => |d| {
+                        @constCast(d.row).deinit(self.allocator);
+                        self.allocator.destroy(@constCast(d.row));
+                    },
+                    .update => |u| {
+                        @constCast(u.old_row).deinit(self.allocator);
+                        self.allocator.destroy(@constCast(u.old_row));
+                    },
+                    .insert => {},
+                }
+            }
+            changes.deinit(self.allocator);
+        }
 
         for (query_sets) |qs| {
             for (qs.tables) |table_update| {
@@ -266,15 +304,20 @@ pub const ClientCache = struct {
                     defer self.allocator.free(del_decoded);
                     var del_processed: usize = 0;
                     errdefer for (del_decoded[del_processed..]) |*r| r.deinit(self.allocator);
-                    for (del_decoded) |row| {
+                    for (del_decoded) |*row_ptr| {
+                        const row = row_ptr.*;
                         const pk = try self.extractPk(row, store.pk_col_indices);
                         del_processed += 1;
                         if (store.rows.fetchRemove(pk)) |kv| {
+                            // Free the original PK from the store — we use our new pk for deleted_map
+                            self.allocator.free(kv.key.bytes);
                             try deleted_map.put(self.allocator, pk, kv.value);
                         } else {
-                            row.deinit(self.allocator);
                             self.allocator.free(pk.bytes);
                         }
+                        // The decoded delete row was only needed for PK extraction.
+                        // Free it now — the actual row data lives in the cache/deleted_map.
+                        @constCast(row_ptr).deinit(self.allocator);
                     }
 
                     // Process inserts, checking against deleted map for updates (O(1) per lookup)
@@ -311,14 +354,29 @@ pub const ClientCache = struct {
                         }
                     }
 
-                    // Remaining deletes (not matched by inserts) are pure deletes
-                    // These will be cleaned up by the defer above after callback dispatch
-                    var rem_it = deleted_map.valueIterator();
-                    while (rem_it.next()) |drow| {
-                        try changes.append(self.allocator, .{ .delete = .{
-                            .table_name = update.table_name,
-                            .row = drow,
-                        } });
+                    // Remaining deletes (not matched by inserts) are pure deletes.
+                    // Move ownership from deleted_map to heap-allocated Row copies
+                    // so they survive past the defer cleanup. We collect keys to
+                    // remove after iteration.
+                    {
+                        var rem_it = deleted_map.iterator();
+                        var keys_to_remove = std.ArrayListUnmanaged(PrimaryKey){};
+                        defer keys_to_remove.deinit(self.allocator);
+                        while (rem_it.next()) |entry| {
+                            const del_row_ptr = try self.allocator.create(Row);
+                            del_row_ptr.* = entry.value_ptr.*;
+                            try keys_to_remove.append(self.allocator, entry.key_ptr.*);
+                            try changes.append(self.allocator, .{ .delete = .{
+                                .table_name = update.table_name,
+                                .row = del_row_ptr,
+                            } });
+                        }
+                        // Remove transferred entries so defer doesn't double-free.
+                        // Free the PK bytes since ownership didn't transfer.
+                        for (keys_to_remove.items) |pk| {
+                            _ = deleted_map.fetchRemove(pk);
+                            self.allocator.free(pk.bytes);
+                        }
                     }
                 },
                 .event => {
@@ -466,7 +524,7 @@ test "cache apply inserts via subscribe" {
     defer cache.deinit();
 
     const changes = try cache.applySubscribeApplied(&table_rows);
-    defer allocator.free(changes);
+    defer RowChange.freeChanges(allocator, changes);
 
     try std.testing.expectEqual(@as(usize, 2), changes.len);
     try std.testing.expectEqual(@as(usize, 2), cache.tableRowCount("users"));
@@ -536,7 +594,7 @@ test "find by primary key" {
     }};
 
     const changes = try cache.applySubscribeApplied(&table_rows);
-    defer allocator.free(changes);
+    defer RowChange.freeChanges(allocator, changes);
 
     // Find by PK value
     const found = try cache.find("users", .{ .u64 = 42 });
@@ -604,7 +662,7 @@ test "getTyped returns typed structs" {
     }};
 
     const changes = try cache.applySubscribeApplied(&table_rows);
-    defer allocator.free(changes);
+    defer RowChange.freeChanges(allocator, changes);
 
     // Get typed — borrows from cache, just free the slice
     const users = try cache.getTyped(User, "users");
@@ -616,4 +674,116 @@ test "getTyped returns typed structs" {
     const alice = try cache.findTyped(User, "users", .{ .u64 = 1 });
     try std.testing.expect(alice != null);
     try std.testing.expectEqual(@as(u64, 1), alice.?.id);
+}
+
+test "cache transaction update with delete and update changes" {
+    const allocator = std.testing.allocator;
+
+    const tables = [_]schema_mod.TableDef{.{
+        .name = "users",
+        .columns = &test_columns,
+        .primary_key = &[_]u32{0},
+    }};
+    const test_schema = Schema{
+        .tables = &tables,
+        .reducers = &.{},
+        .typespace = &.{},
+        .allocator = allocator,
+    };
+
+    var cache = ClientCache.init(allocator, test_schema);
+    defer cache.deinit();
+
+    // First, insert two rows via subscribe
+    const row1 = try encodeTestRow(allocator, 1, "Alice");
+    defer allocator.free(row1);
+    const row2 = try encodeTestRow(allocator, 2, "Bob");
+    defer allocator.free(row2);
+
+    const all_data = try std.mem.concat(allocator, u8, &.{ row1, row2 });
+    defer allocator.free(all_data);
+
+    const offset_vals = [_]u64{ 0, row1.len };
+    var offset_bytes: [2 * 8]u8 = undefined;
+    for (offset_vals, 0..) |val, oi| {
+        std.mem.writeInt(u64, offset_bytes[oi * 8 ..][0..8], val, .little);
+    }
+    const init_rows = [_]TableRows{.{
+        .table_name = "users",
+        .rows = .{
+            .size_hint = .{ .row_offsets = .{ .count = 2, .raw_bytes = &offset_bytes } },
+            .rows_data = all_data,
+        },
+    }};
+
+    const init_changes = try cache.applySubscribeApplied(&init_rows);
+    defer RowChange.freeChanges(allocator, init_changes);
+
+    try std.testing.expectEqual(@as(usize, 2), cache.tableRowCount("users"));
+
+    // Now apply a transaction that:
+    // - Deletes Bob (id=2)
+    // - Updates Alice (id=1 -> name changes to "Alicia")
+    const del_row2 = try encodeTestRow(allocator, 2, "Bob");
+    defer allocator.free(del_row2);
+    const del_row1 = try encodeTestRow(allocator, 1, "Alice");
+    defer allocator.free(del_row1);
+    const ins_row1 = try encodeTestRow(allocator, 1, "Alicia");
+    defer allocator.free(ins_row1);
+
+    // Deletes: row2 (Bob) + row1 (Alice)
+    const del_data = try std.mem.concat(allocator, u8, &.{ del_row2, del_row1 });
+    defer allocator.free(del_data);
+    const del_offsets = [_]u64{ 0, del_row2.len };
+    var del_off_bytes: [2 * 8]u8 = undefined;
+    for (del_offsets, 0..) |val, oi| {
+        std.mem.writeInt(u64, del_off_bytes[oi * 8 ..][0..8], val, .little);
+    }
+
+    // Inserts: row1 with new name (Alicia) — only Alice gets re-inserted
+    const ins_data = ins_row1;
+    const ins_offsets = [_]u64{0};
+    var ins_off_bytes: [1 * 8]u8 = undefined;
+    std.mem.writeInt(u64, ins_off_bytes[0..8], ins_offsets[0], .little);
+
+    const update_rows = [_]TableUpdateRows{.{ .persistent = .{
+        .deletes = .{
+            .size_hint = .{ .row_offsets = .{ .count = 2, .raw_bytes = &del_off_bytes } },
+            .rows_data = del_data,
+        },
+        .inserts = .{
+            .size_hint = .{ .row_offsets = .{ .count = 1, .raw_bytes = &ins_off_bytes } },
+            .rows_data = ins_data,
+        },
+    } }};
+    const table_updates = [_]TableUpdate{.{
+        .table_name = "users",
+        .rows = &update_rows,
+    }};
+    const query_set_updates = [_]QuerySetUpdate{.{
+        .query_set_id = 1,
+        .tables = &table_updates,
+    }};
+
+    const tx_changes = try cache.applyTransactionUpdate(&query_set_updates);
+    defer RowChange.freeChanges(allocator, tx_changes);
+
+    // Should have 2 changes: one update (Alice -> Alicia) and one delete (Bob)
+    try std.testing.expectEqual(@as(usize, 2), tx_changes.len);
+
+    // Verify we have one update and one delete
+    var updates_count: usize = 0;
+    var deletes_count: usize = 0;
+    for (tx_changes) |change| {
+        switch (change) {
+            .update => updates_count += 1,
+            .delete => deletes_count += 1,
+            .insert => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), updates_count);
+    try std.testing.expectEqual(@as(usize, 1), deletes_count);
+
+    // Cache should now have 1 row (Alicia)
+    try std.testing.expectEqual(@as(usize, 1), cache.tableRowCount("users"));
 }

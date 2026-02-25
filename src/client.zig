@@ -427,7 +427,7 @@ pub const SpacetimeClient = struct {
             },
             .subscribe_applied => |sa| {
                 const changes = try self.cache.applySubscribeApplied(sa.rows);
-                defer self.allocator.free(changes);
+                defer RowChange.freeChanges(self.allocator, changes);
                 // Fire per-table subscribe callbacks
                 for (sa.rows) |tr| {
                     self.handler.onSubscribeApplied(tr.table_name, 0);
@@ -437,7 +437,7 @@ pub const SpacetimeClient = struct {
             },
             .transaction_update => |tu| {
                 const changes = try self.cache.applyTransactionUpdate(tu.query_sets);
-                defer self.allocator.free(changes);
+                defer RowChange.freeChanges(self.allocator, changes);
                 self.dispatchChanges(changes);
             },
             .reducer_result => |rr| {
@@ -445,7 +445,7 @@ pub const SpacetimeClient = struct {
                 switch (rr.result) {
                     .ok => |ok_result| {
                         const changes = try self.cache.applyTransactionUpdate(ok_result.transaction);
-                        defer self.allocator.free(changes);
+                        defer RowChange.freeChanges(self.allocator, changes);
                         self.dispatchChanges(changes);
                     },
                     else => {},
