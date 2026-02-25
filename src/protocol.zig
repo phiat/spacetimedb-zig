@@ -10,6 +10,7 @@
 //   OneOffQueryResult(5), ReducerResult(6), ProcedureResult(7)
 
 const std = @import("std");
+const flate = std.compress.flate;
 const bsatn = @import("bsatn.zig");
 const types = @import("types.zig");
 
@@ -47,10 +48,18 @@ pub fn decompress(allocator: std.mem.Allocator, frame: []const u8) Error!Decompr
     return switch (tag) {
         0x00 => .{ .data = payload, .allocated = false },
         0x02 => {
-            // TODO: gzip decompression — Zig 0.15 std.compress.flate uses new Io.Reader
-            // interface. Implement when connection layer is built.
-            _ = allocator;
-            return Error.DecompressionFailed;
+            // Gzip decompression via std.compress.flate
+            var reader: std.Io.Reader = .fixed(payload);
+            var writer: std.Io.Writer.Allocating = .init(allocator);
+            errdefer writer.deinit();
+
+            var decomp: flate.Decompress = .init(&reader, .gzip, &.{});
+            _ = decomp.reader.streamRemaining(&writer.writer) catch
+                return Error.DecompressionFailed;
+
+            const decompressed = writer.toOwnedSlice() catch
+                return Error.DecompressionFailed;
+            return .{ .data = decompressed, .allocated = true };
         },
         0x01 => Error.DecompressionFailed, // Brotli not supported
         else => Error.UnknownCompression,
@@ -775,4 +784,27 @@ test "decompress unknown tag" {
     const allocator = std.testing.allocator;
     const result = decompress(allocator, &[_]u8{ 0xFF, 1 });
     try std.testing.expectError(Error.UnknownCompression, result);
+}
+
+test "decompress gzip" {
+    const allocator = std.testing.allocator;
+
+    // Pre-compressed gzip of "Hello SpacetimeDB gzip test"
+    const gz_data = [_]u8{
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xf3, 0x48,
+        0xcd, 0xc9, 0xc9, 0x57, 0x08, 0x2e, 0x48, 0x4c, 0x4e, 0x2d, 0xc9, 0xcc,
+        0x4d, 0x75, 0x71, 0x52, 0x48, 0xaf, 0xca, 0x2c, 0x50, 0x28, 0x49, 0x2d,
+        0x2e, 0x01, 0x00, 0xcb, 0xf3, 0xf0, 0x4a, 0x1b, 0x00, 0x00, 0x00,
+    };
+
+    // Build frame: 0x02 gzip tag + compressed data
+    var frame: [1 + gz_data.len]u8 = undefined;
+    frame[0] = 0x02;
+    @memcpy(frame[1..], &gz_data);
+
+    const result = try decompress(allocator, &frame);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.allocated);
+    try std.testing.expectEqualStrings("Hello SpacetimeDB gzip test", result.data);
 }

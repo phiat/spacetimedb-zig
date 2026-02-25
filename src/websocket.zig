@@ -203,6 +203,17 @@ pub const Connection = struct {
         return request_id;
     }
 
+    /// Send an Unsubscribe message. Returns the request_id.
+    pub fn unsubscribe(self: *Connection, query_set_id: u32, flags: protocol.UnsubscribeFlags) !u32 {
+        const request_id = self.nextRequestId();
+        try self.sendMessage(.{ .unsubscribe = .{
+            .request_id = request_id,
+            .query_set_id = query_set_id,
+            .flags = flags,
+        } });
+        return request_id;
+    }
+
     /// Send a OneOffQuery. Returns the request_id.
     pub fn oneOffQuery(self: *Connection, query: []const u8) !u32 {
         const request_id = self.nextRequestId();
@@ -610,6 +621,40 @@ test "Connection send message via mock" {
     try std.testing.expectEqual(@as(u32, 1), result.request_id);
     try std.testing.expectEqual(@as(u32, 1), result.query_set_id);
     try std.testing.expectEqual(@as(usize, 1), mock.sent_data.items.len);
+}
+
+test "Connection unsubscribe sends message" {
+    const allocator = std.testing.allocator;
+    var conn = Connection.init(allocator, .{
+        .host = "localhost",
+        .database = "test",
+    });
+    defer conn.deinit();
+
+    var mock = MockTransport.init(allocator);
+    defer mock.deinit();
+    conn.connect(mock.transport());
+
+    // Subscribe first to get a query_set_id
+    const queries = [_][]const u8{"SELECT * FROM users"};
+    const sub_result = try conn.subscribe(&queries);
+
+    // Now unsubscribe
+    const unsub_req_id = try conn.unsubscribe(sub_result.query_set_id, .default);
+    try std.testing.expectEqual(@as(u32, 2), unsub_req_id); // second request
+    try std.testing.expectEqual(@as(usize, 2), mock.sent_data.items.len);
+
+    // Verify the unsubscribe message decodes correctly
+    const bsatn_mod = @import("bsatn.zig");
+    var dec = bsatn_mod.Decoder.init(mock.sent_data.items[1]);
+    const tag = try dec.decodeU8();
+    try std.testing.expectEqual(@as(u8, 1), tag); // Unsubscribe tag
+    const req_id = try dec.decodeU32();
+    try std.testing.expectEqual(@as(u32, 2), req_id);
+    const qs_id = try dec.decodeU32();
+    try std.testing.expectEqual(sub_result.query_set_id, qs_id);
+    const flags = try dec.decodeU8();
+    try std.testing.expectEqual(@as(u8, 0), flags); // default
 }
 
 test "Connection backoff calculation" {

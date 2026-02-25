@@ -68,6 +68,11 @@ pub fn buildSqlUrl(allocator: std.mem.Allocator, config: Config) ![]u8 {
     );
 }
 
+/// Build the verify identity URL.
+pub fn buildVerifyIdentityUrl(allocator: std.mem.Allocator, host: []const u8, identity_hex: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "http://{s}/v1/identity/{s}/verify", .{ host, identity_hex });
+}
+
 /// Build the ping URL.
 pub fn buildPingUrl(allocator: std.mem.Allocator, host: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "http://{s}/v1/ping", .{host});
@@ -182,6 +187,20 @@ pub const Client = struct {
         return self.transport.post(self.allocator, url, sql, auth_header);
     }
 
+    /// Verify an identity token. Returns true if the token is valid for the identity.
+    pub fn verifyIdentity(self: *Client, identity_hex: []const u8, token: []const u8) !bool {
+        const url = try buildVerifyIdentityUrl(self.allocator, self.config.host, identity_hex);
+        defer self.allocator.free(url);
+
+        const auth = try buildAuthHeader(self.allocator, token);
+        defer self.allocator.free(auth);
+
+        const resp = try self.transport.get(self.allocator, url, auth);
+        defer resp.deinit();
+
+        return resp.isSuccess();
+    }
+
     /// Ping the server.
     pub fn ping(self: *Client) !bool {
         const url = try buildPingUrl(self.allocator, self.config.host);
@@ -193,6 +212,77 @@ pub const Client = struct {
         return resp.isSuccess();
     }
 };
+
+// ============================================================
+// Credential Persistence
+// ============================================================
+
+pub const Credentials = struct {
+    identity: []const u8,
+    token: []const u8,
+};
+
+/// Save credentials to a file. Format: identity\ntoken
+pub fn saveCredentials(allocator: std.mem.Allocator, dir_path: []const u8, database: []const u8, identity: []const u8, token: []const u8) !void {
+    // Ensure directory exists
+    std.fs.cwd().makePath(dir_path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}.creds", .{ dir_path, database });
+    defer allocator.free(file_path);
+
+    const file = try std.fs.cwd().createFile(file_path, .{});
+    defer file.close();
+
+    try file.writeAll(identity);
+    try file.writeAll("\n");
+    try file.writeAll(token);
+}
+
+/// Load credentials from a file. Caller owns returned strings.
+pub fn loadCredentials(allocator: std.mem.Allocator, dir_path: []const u8, database: []const u8) !?Credentials {
+    const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}.creds", .{ dir_path, database });
+    defer allocator.free(file_path);
+
+    const file = std.fs.cwd().openFile(file_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
+    defer allocator.free(content);
+
+    // Split on first newline
+    if (std.mem.indexOfScalar(u8, content, '\n')) |nl| {
+        const identity = try allocator.dupe(u8, content[0..nl]);
+        errdefer allocator.free(identity);
+        const token = try allocator.dupe(u8, std.mem.trimRight(u8, content[nl + 1 ..], "\n\r"));
+        return .{ .identity = identity, .token = token };
+    }
+    return null;
+}
+
+/// Free credentials loaded by loadCredentials.
+pub fn freeCredentials(allocator: std.mem.Allocator, creds: Credentials) void {
+    allocator.free(creds.identity);
+    allocator.free(creds.token);
+}
+
+/// Default credentials directory (relative to home).
+pub const DEFAULT_CREDS_DIR = ".spacetimedb_client_credentials";
+
+/// Get the default credentials directory path. Caller owns returned string.
+pub fn defaultCredsDir(allocator: std.mem.Allocator) ![]const u8 {
+    const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return allocator.dupe(u8, DEFAULT_CREDS_DIR),
+        else => return err,
+    };
+    defer allocator.free(home);
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, DEFAULT_CREDS_DIR });
+}
 
 // ============================================================
 // Tests
@@ -243,6 +333,16 @@ test "buildSqlUrl" {
     defer allocator.free(url);
     try std.testing.expectEqualStrings(
         "http://example.com/v1/database/prod/sql",
+        url,
+    );
+}
+
+test "buildVerifyIdentityUrl" {
+    const allocator = std.testing.allocator;
+    const url = try buildVerifyIdentityUrl(allocator, "localhost:3000", "abc123");
+    defer allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "http://localhost:3000/v1/identity/abc123/verify",
         url,
     );
 }
@@ -393,6 +493,71 @@ test "Client ping success" {
 
     const result = try client.ping();
     try std.testing.expect(result);
+}
+
+test "Client verifyIdentity success" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "ok",
+    };
+
+    var client = Client.init(allocator, .{
+        .host = "localhost:3000",
+        .database = "test",
+    }, mock.transport());
+
+    const result = try client.verifyIdentity("abc123hex", "my-jwt");
+    try std.testing.expect(result);
+}
+
+test "Client verifyIdentity unauthorized" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 401,
+        .response_body = "unauthorized",
+    };
+
+    var client = Client.init(allocator, .{
+        .host = "localhost:3000",
+        .database = "test",
+    }, mock.transport());
+
+    const result = try client.verifyIdentity("abc123hex", "bad-token");
+    try std.testing.expect(!result);
+}
+
+test "saveCredentials and loadCredentials round-trip" {
+    const allocator = std.testing.allocator;
+    const tmp_dir = "/tmp/spacetimedb-zig-test-creds";
+
+    // Clean up before test
+    std.fs.cwd().deleteTree(tmp_dir) catch {};
+
+    try saveCredentials(allocator, tmp_dir, "my_db", "identity-hex-abc", "jwt-token-xyz");
+
+    const creds = (try loadCredentials(allocator, tmp_dir, "my_db")).?;
+    defer freeCredentials(allocator, creds);
+
+    try std.testing.expectEqualStrings("identity-hex-abc", creds.identity);
+    try std.testing.expectEqualStrings("jwt-token-xyz", creds.token);
+
+    // Clean up
+    std.fs.cwd().deleteTree(tmp_dir) catch {};
+}
+
+test "loadCredentials returns null for missing file" {
+    const allocator = std.testing.allocator;
+    const result = try loadCredentials(allocator, "/tmp/nonexistent-dir-12345", "nope");
+    try std.testing.expect(result == null);
+}
+
+test "defaultCredsDir" {
+    const allocator = std.testing.allocator;
+    const dir = try defaultCredsDir(allocator);
+    defer allocator.free(dir);
+    // Should contain the default dir name
+    try std.testing.expect(std.mem.endsWith(u8, dir, DEFAULT_CREDS_DIR));
 }
 
 test "Client ping failure" {

@@ -124,8 +124,24 @@ pub const ClientCache = struct {
         return gop.value_ptr;
     }
 
-    /// Get a row by table name and primary key bytes.
+    /// Get a row by table name and raw primary key bytes.
     pub fn getRow(self: *ClientCache, table_name: []const u8, pk_bytes: []const u8) ?*const Row {
+        const store = self.tables.get(table_name) orelse return null;
+        const key = PrimaryKey{ .bytes = pk_bytes };
+        return store.rows.getPtr(key);
+    }
+
+    /// Find a row by primary key value(s).
+    /// For single-column PK: pass the value directly (e.g., .{ .u64 = 42 }).
+    /// For composite PK: pass a product with the PK fields in order.
+    /// Encodes the value to BSATN internally and looks it up.
+    pub fn find(self: *ClientCache, table_name: []const u8, pk_value: AlgebraicValue) !?*const Row {
+        const bsatn_mod = @import("bsatn.zig");
+        var enc = bsatn_mod.Encoder.init();
+        defer enc.deinit(self.allocator);
+        try enc.encodeValue(self.allocator, pk_value);
+        const pk_bytes = enc.writtenSlice();
+
         const store = self.tables.get(table_name) orelse return null;
         const key = PrimaryKey{ .bytes = pk_bytes };
         return store.rows.getPtr(key);
@@ -438,4 +454,67 @@ test "PrimaryKey equality" {
     const pk3 = PrimaryKey{ .bytes = &[_]u8{ 2, 0, 0, 0 } };
     try std.testing.expect(pk1.eql(pk2));
     try std.testing.expect(!pk1.eql(pk3));
+}
+
+test "find by primary key" {
+    const allocator = std.testing.allocator;
+
+    // Schema with PK on column 0 (id)
+    const tables = [_]schema_mod.TableDef{.{
+        .name = "users",
+        .columns = &test_columns,
+        .primary_key = &[_]u32{0},
+    }};
+    const test_schema = Schema{
+        .tables = &tables,
+        .reducers = &.{},
+        .typespace = &.{},
+        .allocator = allocator,
+    };
+
+    var cache = ClientCache.init(allocator, test_schema);
+    defer cache.deinit();
+
+    // Insert two rows via subscribe
+    const row1 = try encodeTestRow(allocator, 42, "Alice");
+    defer allocator.free(row1);
+    const row2 = try encodeTestRow(allocator, 99, "Bob");
+    defer allocator.free(row2);
+
+    const all_data = try std.mem.concat(allocator, u8, &.{ row1, row2 });
+    defer allocator.free(all_data);
+
+    const offsets = [_]u64{ 0, row1.len };
+    const table_rows = [_]TableRows{.{
+        .table_name = "users",
+        .rows = .{
+            .size_hint = .{ .row_offsets = &offsets },
+            .rows_data = all_data,
+        },
+    }};
+
+    const changes = try cache.applySubscribeApplied(&table_rows);
+    defer allocator.free(changes);
+
+    // Find by PK value
+    const found = try cache.find("users", .{ .u64 = 42 });
+    try std.testing.expect(found != null);
+    try std.testing.expectEqual(@as(u64, 42), found.?.fields[0].value.u64);
+
+    const found2 = try cache.find("users", .{ .u64 = 99 });
+    try std.testing.expect(found2 != null);
+    try std.testing.expectEqualStrings("Bob", found2.?.fields[1].value.string);
+
+    // Not found
+    const missing = try cache.find("users", .{ .u64 = 999 });
+    try std.testing.expect(missing == null);
+}
+
+test "find returns null for missing table" {
+    const allocator = std.testing.allocator;
+    var cache = ClientCache.init(allocator, makeTestSchema(allocator));
+    defer cache.deinit();
+
+    const result = try cache.find("nonexistent", .{ .u64 = 1 });
+    try std.testing.expect(result == null);
 }
