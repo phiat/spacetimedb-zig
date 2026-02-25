@@ -9,6 +9,8 @@ pub const protocol = @import("protocol.zig");
 pub const schema = @import("schema.zig");
 pub const row_decoder = @import("row_decoder.zig");
 pub const value_encoder = @import("value_encoder.zig");
+pub const client_cache = @import("client_cache.zig");
+pub const websocket = @import("websocket.zig");
 
 test {
     _ = types;
@@ -17,4 +19,6 @@ test {
     _ = schema;
     _ = row_decoder;
     _ = value_encoder;
+    _ = client_cache;
+    _ = websocket;
 }

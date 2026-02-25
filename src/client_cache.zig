@@ -1,0 +1,441 @@
+// Client Cache (In-Memory Table Store)
+//
+// Stores decoded rows per table, keyed by primary key.
+// Applies inserts/deletes from SubscribeApplied and TransactionUpdate messages.
+// Detects updates (delete+insert with same PK) and fires callbacks.
+
+const std = @import("std");
+const types = @import("types.zig");
+const protocol = @import("protocol.zig");
+const schema_mod = @import("schema.zig");
+const row_decoder = @import("row_decoder.zig");
+
+const AlgebraicValue = types.AlgebraicValue;
+const Column = types.Column;
+const Row = row_decoder.Row;
+const Schema = schema_mod.Schema;
+const TableRows = protocol.TableRows;
+const TableUpdate = protocol.TableUpdate;
+const TableUpdateRows = protocol.TableUpdateRows;
+const QuerySetUpdate = protocol.QuerySetUpdate;
+const BsatnRowList = protocol.BsatnRowList;
+
+/// A primary key: either a single value hash or composite key hash.
+/// We store rows keyed by the BSATN bytes of their PK columns for identity.
+pub const PrimaryKey = struct {
+    /// Raw BSATN bytes of the primary key column(s), owned by the cache.
+    bytes: []const u8,
+
+    pub fn eql(a: PrimaryKey, b: PrimaryKey) bool {
+        return std.mem.eql(u8, a.bytes, b.bytes);
+    }
+
+    pub fn hash(self: PrimaryKey) u64 {
+        return std.hash.Wyhash.hash(0, self.bytes);
+    }
+};
+
+const PkContext = struct {
+    pub fn hash(_: PkContext, key: PrimaryKey) u64 {
+        return key.hash();
+    }
+
+    pub fn eql(_: PkContext, a: PrimaryKey, b: PrimaryKey) bool {
+        return a.eql(b);
+    }
+};
+
+const RowMap = std.HashMapUnmanaged(PrimaryKey, Row, PkContext, 80);
+
+/// Change type for row-level callbacks.
+pub const RowChange = union(enum) {
+    insert: struct {
+        table_name: []const u8,
+        row: *const Row,
+    },
+    delete: struct {
+        table_name: []const u8,
+        row: *const Row,
+    },
+    update: struct {
+        table_name: []const u8,
+        old_row: *const Row,
+        new_row: *const Row,
+    },
+};
+
+/// Per-table storage.
+const TableStore = struct {
+    rows: RowMap,
+    pk_col_indices: []const u32,
+
+    fn init() TableStore {
+        return .{
+            .rows = .{},
+            .pk_col_indices = &.{},
+        };
+    }
+
+    fn deinit(self: *TableStore, allocator: std.mem.Allocator) void {
+        var it = self.rows.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.bytes);
+            entry.value_ptr.deinit(allocator);
+        }
+        self.rows.deinit(allocator);
+    }
+
+    fn count(self: *const TableStore) usize {
+        return self.rows.count();
+    }
+};
+
+pub const ClientCache = struct {
+    allocator: std.mem.Allocator,
+    tables: std.StringHashMapUnmanaged(TableStore),
+    table_schema: schema_mod.Schema,
+
+    pub fn init(allocator: std.mem.Allocator, s: Schema) ClientCache {
+        return .{
+            .allocator = allocator,
+            .tables = .{},
+            .table_schema = s,
+        };
+    }
+
+    pub fn deinit(self: *ClientCache) void {
+        var it = self.tables.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.tables.deinit(self.allocator);
+    }
+
+    /// Get a table store, creating it if needed.
+    fn getOrCreateTable(self: *ClientCache, table_name: []const u8) !*TableStore {
+        const gop = try self.tables.getOrPut(self.allocator, table_name);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = TableStore.init();
+            // Resolve PK indices from schema
+            if (self.table_schema.primaryKeyFor(table_name)) |pk_indices| {
+                gop.value_ptr.pk_col_indices = pk_indices;
+            }
+        }
+        return gop.value_ptr;
+    }
+
+    /// Get a row by table name and primary key bytes.
+    pub fn getRow(self: *ClientCache, table_name: []const u8, pk_bytes: []const u8) ?*const Row {
+        const store = self.tables.get(table_name) orelse return null;
+        const key = PrimaryKey{ .bytes = pk_bytes };
+        return store.rows.getPtr(key);
+    }
+
+    /// Get all rows in a table. Caller must free the returned slice.
+    pub fn getTableRows(self: *ClientCache, table_name: []const u8) ![]const Row {
+        const store = self.tables.get(table_name) orelse return &.{};
+        const result = try self.allocator.alloc(Row, store.rows.count());
+        var it = store.rows.valueIterator();
+        var i: usize = 0;
+        while (it.next()) |row| {
+            result[i] = row.*;
+            i += 1;
+        }
+        return result;
+    }
+
+    /// Get number of rows in a table.
+    pub fn tableRowCount(self: *ClientCache, table_name: []const u8) usize {
+        const store = self.tables.get(table_name) orelse return 0;
+        return store.count();
+    }
+
+    /// Apply initial rows from SubscribeApplied.
+    /// Returns list of changes for callbacks.
+    pub fn applySubscribeApplied(
+        self: *ClientCache,
+        table_rows_list: []const TableRows,
+    ) ![]RowChange {
+        var changes = std.ArrayListUnmanaged(RowChange){};
+        errdefer changes.deinit(self.allocator);
+
+        for (table_rows_list) |tr| {
+            const columns = self.table_schema.columnsFor(tr.table_name) orelse continue;
+            const decoded = try row_decoder.decodeRowList(self.allocator, tr.rows, columns);
+            defer self.allocator.free(decoded);
+
+            const store = try self.getOrCreateTable(tr.table_name);
+            for (decoded) |row| {
+                const pk = try self.extractPk(row, store.pk_col_indices);
+                try store.rows.put(self.allocator, pk, row);
+                // Get pointer to stored row for callback
+                const stored = store.rows.getPtr(pk).?;
+                try changes.append(self.allocator, .{ .insert = .{
+                    .table_name = tr.table_name,
+                    .row = stored,
+                } });
+            }
+        }
+
+        return changes.toOwnedSlice(self.allocator);
+    }
+
+    /// Apply a TransactionUpdate. Detects updates (delete+insert same PK).
+    /// Returns list of changes for callbacks.
+    pub fn applyTransactionUpdate(
+        self: *ClientCache,
+        query_sets: []const QuerySetUpdate,
+    ) ![]RowChange {
+        var changes = std.ArrayListUnmanaged(RowChange){};
+        errdefer changes.deinit(self.allocator);
+
+        for (query_sets) |qs| {
+            for (qs.tables) |table_update| {
+                try self.applyTableUpdate(table_update, &changes);
+            }
+        }
+
+        return changes.toOwnedSlice(self.allocator);
+    }
+
+    fn applyTableUpdate(
+        self: *ClientCache,
+        update: TableUpdate,
+        changes: *std.ArrayListUnmanaged(RowChange),
+    ) !void {
+        const columns = self.table_schema.columnsFor(update.table_name) orelse return;
+        const store = try self.getOrCreateTable(update.table_name);
+
+        for (update.rows) |row_update| {
+            switch (row_update) {
+                .persistent => |p| {
+                    // Process deletes first, collecting deleted rows for update detection
+                    var deleted_pks = std.ArrayListUnmanaged(PrimaryKey){};
+                    defer deleted_pks.deinit(self.allocator);
+                    var deleted_rows = std.ArrayListUnmanaged(Row){};
+                    defer deleted_rows.deinit(self.allocator);
+
+                    const del_decoded = try row_decoder.decodeRowList(self.allocator, p.deletes, columns);
+                    defer self.allocator.free(del_decoded);
+                    for (del_decoded) |row| {
+                        const pk = try self.extractPk(row, store.pk_col_indices);
+                        if (store.rows.fetchRemove(pk)) |kv| {
+                            try deleted_pks.append(self.allocator, pk);
+                            try deleted_rows.append(self.allocator, kv.value);
+                        } else {
+                            // Row wasn't in cache, free the decoded row
+                            row.deinit(self.allocator);
+                            self.allocator.free(pk.bytes);
+                        }
+                    }
+
+                    // Process inserts, checking against deleted PKs for updates
+                    const ins_decoded = try row_decoder.decodeRowList(self.allocator, p.inserts, columns);
+                    defer self.allocator.free(ins_decoded);
+                    for (ins_decoded) |row| {
+                        const pk = try self.extractPk(row, store.pk_col_indices);
+
+                        // Check if this is an update (same PK was just deleted)
+                        var was_update = false;
+                        for (deleted_pks.items, 0..) |dpk, di| {
+                            if (dpk.eql(pk)) {
+                                // This is an update - insert new row
+                                try store.rows.put(self.allocator, pk, row);
+                                const stored = store.rows.getPtr(pk).?;
+                                // We need to keep old_row alive until callback processes it
+                                // Store as update change
+                                try changes.append(self.allocator, .{ .update = .{
+                                    .table_name = update.table_name,
+                                    .old_row = &deleted_rows.items[di],
+                                    .new_row = stored,
+                                } });
+                                was_update = true;
+                                // Free the old PK bytes since we have a new copy
+                                self.allocator.free(dpk.bytes);
+                                _ = deleted_pks.orderedRemove(di);
+                                _ = deleted_rows.orderedRemove(di);
+                                break;
+                            }
+                        }
+
+                        if (!was_update) {
+                            try store.rows.put(self.allocator, pk, row);
+                            const stored = store.rows.getPtr(pk).?;
+                            try changes.append(self.allocator, .{ .insert = .{
+                                .table_name = update.table_name,
+                                .row = stored,
+                            } });
+                        }
+                    }
+
+                    // Remaining deletes (not matched by inserts) are pure deletes
+                    for (deleted_pks.items, deleted_rows.items) |dpk, *drow| {
+                        _ = dpk;
+                        try changes.append(self.allocator, .{ .delete = .{
+                            .table_name = update.table_name,
+                            .row = drow,
+                        } });
+                    }
+                },
+                .event => {
+                    // Event tables are transient — no cache storage
+                },
+            }
+        }
+    }
+
+    /// Extract primary key BSATN bytes from a decoded row.
+    fn extractPk(self: *ClientCache, row: Row, pk_indices: []const u32) !PrimaryKey {
+        if (pk_indices.len == 0) {
+            // No PK defined — use all fields as key
+            return self.hashAllFields(row);
+        }
+
+        const bsatn_mod = @import("bsatn.zig");
+        var enc = bsatn_mod.Encoder.init();
+        defer enc.deinit(self.allocator);
+
+        for (pk_indices) |idx| {
+            const i: usize = @intCast(idx);
+            if (i < row.fields.len) {
+                try enc.encodeValue(self.allocator, row.fields[i].value);
+            }
+        }
+
+        return .{ .bytes = try enc.toOwnedSlice(self.allocator) };
+    }
+
+    /// Hash all fields when no PK is defined.
+    fn hashAllFields(self: *ClientCache, row: Row) !PrimaryKey {
+        const bsatn_mod = @import("bsatn.zig");
+        var enc = bsatn_mod.Encoder.init();
+        defer enc.deinit(self.allocator);
+
+        for (row.fields) |f| {
+            try enc.encodeValue(self.allocator, f.value);
+        }
+
+        return .{ .bytes = try enc.toOwnedSlice(self.allocator) };
+    }
+};
+
+// ============================================================
+// Tests
+// ============================================================
+
+const bsatn = @import("bsatn.zig");
+const Encoder = bsatn.Encoder;
+
+fn makeTestSchema(allocator: std.mem.Allocator) Schema {
+    return .{
+        .tables = &.{},
+        .reducers = &.{},
+        .typespace = &.{},
+        .allocator = allocator,
+    };
+}
+
+fn encodeTestRow(allocator: std.mem.Allocator, id: u64, name: []const u8) ![]u8 {
+    var enc = Encoder.init();
+    defer enc.deinit(allocator);
+    try enc.encodeU64(allocator, id);
+    try enc.encodeString(allocator, name);
+    return enc.toOwnedSlice(allocator);
+}
+
+const test_columns = [_]Column{
+    .{ .name = "id", .type = .u64 },
+    .{ .name = "name", .type = .string },
+};
+
+test "cache init and deinit" {
+    const allocator = std.testing.allocator;
+    var cache = ClientCache.init(allocator, makeTestSchema(allocator));
+    defer cache.deinit();
+    try std.testing.expectEqual(@as(usize, 0), cache.tables.count());
+}
+
+test "cache insert and retrieve" {
+    const allocator = std.testing.allocator;
+    var cache = ClientCache.init(allocator, makeTestSchema(allocator));
+    defer cache.deinit();
+
+    // Encode a row
+    const row_data = try encodeTestRow(allocator, 1, "Alice");
+    defer allocator.free(row_data);
+
+    // Decode it
+    const row = try row_decoder.decodeRow(allocator, row_data, &test_columns);
+
+    // Insert manually into cache
+    const store = try cache.getOrCreateTable("users");
+    const pk = try cache.extractPk(row, store.pk_col_indices);
+    try store.rows.put(allocator, pk, row);
+
+    try std.testing.expectEqual(@as(usize, 1), cache.tableRowCount("users"));
+}
+
+test "cache apply inserts via subscribe" {
+    const allocator = std.testing.allocator;
+
+    // Build raw row data: two rows concatenated
+    const row1 = try encodeTestRow(allocator, 1, "Alice");
+    defer allocator.free(row1);
+    const row2 = try encodeTestRow(allocator, 2, "Bob");
+    defer allocator.free(row2);
+
+    const all_data = try std.mem.concat(allocator, u8, &.{ row1, row2 });
+    defer allocator.free(all_data);
+
+    const offsets = [_]u64{ 0, row1.len };
+    const table_rows = [_]TableRows{.{
+        .table_name = "users",
+        .rows = .{
+            .size_hint = .{ .row_offsets = &offsets },
+            .rows_data = all_data,
+        },
+    }};
+
+    // We need a schema that knows about "users" columns
+    // For this test, use a minimal schema with columnsFor override
+    // Since Schema.columnsFor relies on schema.tables, we construct one
+    const tables = [_]schema_mod.TableDef{.{
+        .name = "users",
+        .columns = &test_columns,
+        .primary_key = &[_]u32{0},
+    }};
+    const test_schema = Schema{
+        .tables = &tables,
+        .reducers = &.{},
+        .typespace = &.{},
+        .allocator = allocator,
+    };
+
+    var cache = ClientCache.init(allocator, test_schema);
+    defer cache.deinit();
+
+    const changes = try cache.applySubscribeApplied(&table_rows);
+    defer allocator.free(changes);
+
+    try std.testing.expectEqual(@as(usize, 2), changes.len);
+    try std.testing.expectEqual(@as(usize, 2), cache.tableRowCount("users"));
+
+    // Verify both are inserts
+    try std.testing.expect(changes[0] == .insert);
+    try std.testing.expect(changes[1] == .insert);
+}
+
+test "cache table row count for missing table" {
+    const allocator = std.testing.allocator;
+    var cache = ClientCache.init(allocator, makeTestSchema(allocator));
+    defer cache.deinit();
+    try std.testing.expectEqual(@as(usize, 0), cache.tableRowCount("nonexistent"));
+}
+
+test "PrimaryKey equality" {
+    const pk1 = PrimaryKey{ .bytes = &[_]u8{ 1, 0, 0, 0 } };
+    const pk2 = PrimaryKey{ .bytes = &[_]u8{ 1, 0, 0, 0 } };
+    const pk3 = PrimaryKey{ .bytes = &[_]u8{ 2, 0, 0, 0 } };
+    try std.testing.expect(pk1.eql(pk2));
+    try std.testing.expect(!pk1.eql(pk3));
+}
