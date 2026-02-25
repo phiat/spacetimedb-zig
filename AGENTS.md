@@ -12,12 +12,17 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 - **Protocol**: SpacetimeDB v2 BSATN binary WebSocket protocol
 - **Reference SDK**: `../spacetimedbex/` (Elixir implementation)
 
-### Architecture Layers (bottom-up)
-1. **BSATN codec** — Binary serialization (little-endian, length-prefixed)
-2. **Protocol messages** — Client/server message encoding/decoding
-3. **WebSocket connection** — Connection management, reconnect, compression
-4. **Client cache** — In-memory table storage with primary key indexing
-5. **High-level client** — Public API: connect, subscribe, call reducers, query
+### Architecture Layers (bottom-up, all complete)
+1. **types.zig** — Algebraic type system (AlgebraicType, AlgebraicValue, Column)
+2. **bsatn.zig** — BSATN binary codec (Encoder, Decoder)
+3. **protocol.zig** — v2 binary Client/Server message encoding/decoding
+4. **schema.zig** — JSON schema parser with ref resolution
+5. **row_decoder.zig** — BSATN row data → decoded Row structs
+6. **value_encoder.zig** — AlgebraicValue → BSATN binary (schema-aware)
+7. **client_cache.zig** — In-memory table store with PK-based identity
+8. **websocket.zig** — WebSocket connection state machine (abstract transport)
+9. **http_client.zig** — HTTP REST client (abstract transport)
+10. **client.zig** — High-level client API: connect, subscribe, call reducers, query
 
 ### Key Design Decisions
 - Zig 0.15 removed `async`/`await` — use thread-based concurrency (`std.Thread`)

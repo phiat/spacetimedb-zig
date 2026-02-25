@@ -11,6 +11,8 @@ pub const row_decoder = @import("row_decoder.zig");
 pub const value_encoder = @import("value_encoder.zig");
 pub const client_cache = @import("client_cache.zig");
 pub const websocket = @import("websocket.zig");
+pub const http_client = @import("http_client.zig");
+pub const client = @import("client.zig");
 
 test {
     _ = types;
@@ -21,4 +23,6 @@ test {
     _ = value_encoder;
     _ = client_cache;
     _ = websocket;
+    _ = http_client;
+    _ = client;
 }
