@@ -86,7 +86,7 @@ pub fn decodeRow(
 }
 
 /// Split concatenated row data into individual row slices.
-fn splitRows(
+pub fn splitRows(
     allocator: std.mem.Allocator,
     size_hint: RowSizeHint,
     data: []const u8,

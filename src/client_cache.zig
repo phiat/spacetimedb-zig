@@ -160,6 +160,31 @@ pub const ClientCache = struct {
         return result;
     }
 
+    /// Get all rows in a table as typed structs.
+    /// String fields borrow from cache — valid until next cache mutation.
+    /// Caller must free the returned slice with `allocator.free(result)`.
+    pub fn getTyped(self: *ClientCache, comptime T: type, table_name: []const u8) ![]T {
+        const table_mod = @import("table.zig");
+        const store = self.tables.get(table_name) orelse return try self.allocator.alloc(T, 0);
+        const result = try self.allocator.alloc(T, store.rows.count());
+        var decoded: usize = 0;
+        errdefer self.allocator.free(result);
+        var it = store.rows.valueIterator();
+        while (it.next()) |row| {
+            result[decoded] = try table_mod.fromRow(T, row);
+            decoded += 1;
+        }
+        return result;
+    }
+
+    /// Find a row by primary key value and return it as a typed struct.
+    /// String fields borrow from cache — valid until next cache mutation.
+    pub fn findTyped(self: *ClientCache, comptime T: type, table_name: []const u8, pk_value: AlgebraicValue) !?T {
+        const table_mod = @import("table.zig");
+        const row = try self.find(table_name, pk_value) orelse return null;
+        return try table_mod.fromRow(T, row);
+    }
+
     /// Get number of rows in a table.
     pub fn tableRowCount(self: *ClientCache, table_name: []const u8) usize {
         const store = self.tables.get(table_name) orelse return 0;
@@ -534,4 +559,61 @@ test "find returns null for missing table" {
 
     const result = try cache.find("nonexistent", .{ .u64 = 1 });
     try std.testing.expect(result == null);
+}
+
+test "getTyped returns typed structs" {
+    const allocator = std.testing.allocator;
+
+    const User = struct { id: u64, name: []const u8 };
+
+    const tables = [_]schema_mod.TableDef{.{
+        .name = "users",
+        .columns = &test_columns,
+        .primary_key = &[_]u32{0},
+    }};
+    const test_schema = Schema{
+        .tables = &tables,
+        .reducers = &.{},
+        .typespace = &.{},
+        .allocator = allocator,
+    };
+
+    var cache = ClientCache.init(allocator, test_schema);
+    defer cache.deinit();
+
+    // Insert rows
+    const row1 = try encodeTestRow(allocator, 1, "Alice");
+    defer allocator.free(row1);
+    const row2 = try encodeTestRow(allocator, 2, "Bob");
+    defer allocator.free(row2);
+
+    const all_data = try std.mem.concat(allocator, u8, &.{ row1, row2 });
+    defer allocator.free(all_data);
+
+    const offset_vals = [_]u64{ 0, row1.len };
+    var offset_bytes: [2 * 8]u8 = undefined;
+    for (offset_vals, 0..) |val, oi| {
+        std.mem.writeInt(u64, offset_bytes[oi * 8 ..][0..8], val, .little);
+    }
+    const table_rows = [_]TableRows{.{
+        .table_name = "users",
+        .rows = .{
+            .size_hint = .{ .row_offsets = .{ .count = 2, .raw_bytes = &offset_bytes } },
+            .rows_data = all_data,
+        },
+    }};
+
+    const changes = try cache.applySubscribeApplied(&table_rows);
+    defer allocator.free(changes);
+
+    // Get typed — borrows from cache, just free the slice
+    const users = try cache.getTyped(User, "users");
+    defer allocator.free(users);
+
+    try std.testing.expectEqual(@as(usize, 2), users.len);
+
+    // Find typed
+    const alice = try cache.findTyped(User, "users", .{ .u64 = 1 });
+    try std.testing.expect(alice != null);
+    try std.testing.expectEqual(@as(u64, 1), alice.?.id);
 }

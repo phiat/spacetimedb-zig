@@ -303,6 +303,19 @@ pub const SpacetimeClient = struct {
         return self.cache.find(table_name, pk_value);
     }
 
+    /// Get all rows from a table as typed structs.
+    /// String fields borrow from cache — valid until next cache mutation.
+    /// Free the returned slice with `allocator.free(result)`.
+    pub fn getTyped(self: *SpacetimeClient, comptime T: type, table_name: []const u8) ![]T {
+        return self.cache.getTyped(T, table_name);
+    }
+
+    /// Find a row by PK and return as a typed struct.
+    /// Borrows string data from cache — valid until next cache mutation.
+    pub fn findTyped(self: *SpacetimeClient, comptime T: type, table_name: []const u8, pk_value: AlgebraicValue) !?T {
+        return self.cache.findTyped(T, table_name, pk_value);
+    }
+
     /// Get the parsed schema.
     pub fn getSchema(self: *const SpacetimeClient) ?Schema {
         return self.schema;
