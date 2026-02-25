@@ -370,6 +370,12 @@ pub const WsTransport = struct {
         return connect(allocator, host_port.host, host_port.port, path, config.token);
     }
 
+    /// Set read timeout in milliseconds. Use 0 for no timeout (blocking).
+    /// Use a small value (e.g. 1) for non-blocking polling in a game loop.
+    pub fn setReadTimeout(self: *WsTransport, ms: u32) !void {
+        try self.client.readTimeout(ms);
+    }
+
     pub fn deinit(self: *WsTransport) void {
         self.client.close(.{}) catch {};
         self.client.deinit();
@@ -400,7 +406,10 @@ pub const WsTransport = struct {
     }
 
     fn receiveImpl(self: *WsTransport) !?[]u8 {
-        const message = (try self.client.read()) orelse return null;
+        const message = self.client.read() catch |err| switch (err) {
+            error.WouldBlock => return null, // timeout — no data available
+            else => return err,
+        } orelse return null;
         defer self.client.done(message);
 
         switch (message.type) {

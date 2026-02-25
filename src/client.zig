@@ -240,6 +240,20 @@ pub const SpacetimeClient = struct {
         self.connection.connect(transport);
     }
 
+    /// Connect to SpacetimeDB using a real WebSocket connection.
+    pub fn connectReal(self: *SpacetimeClient) !void {
+        try self.connection.connectReal();
+    }
+
+    /// Set read timeout on the underlying WebSocket transport.
+    /// Use a small value (e.g. 1ms) for non-blocking polling in a game loop.
+    /// Use 0 to restore blocking behavior.
+    pub fn setReadTimeout(self: *SpacetimeClient, ms: u32) !void {
+        if (self.connection.owned_transport) |wt| {
+            try wt.setReadTimeout(ms);
+        }
+    }
+
     /// Build the WebSocket URL for this client.
     pub fn buildUrl(self: *const SpacetimeClient) ![]u8 {
         return self.connection.buildUrl(self.allocator);
