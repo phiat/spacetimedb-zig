@@ -8,6 +8,7 @@
 // so it can be backed by websocket.zig (Karl Seguin) or a test mock.
 
 const std = @import("std");
+const ws = @import("websocket");
 const types = @import("types.zig");
 const protocol = @import("protocol.zig");
 
@@ -241,6 +242,16 @@ pub const Connection = struct {
         return self.reconnect_attempts < self.config.max_reconnect_attempts;
     }
 
+    /// Connect to SpacetimeDB using a real WebSocket connection.
+    /// Creates a WsTransport, performs the handshake, and wires it up.
+    /// The WsTransport is heap-allocated and owned by this Connection.
+    pub fn connectReal(self: *Connection) !void {
+        const ws_transport = try self.allocator.create(WsTransport);
+        errdefer self.allocator.destroy(ws_transport);
+        ws_transport.* = try WsTransport.connectFromConfig(self.allocator, self.config);
+        self.connect(ws_transport.transport());
+    }
+
     /// Record a disconnect and increment attempt counter.
     pub fn recordDisconnect(self: *Connection) Event {
         self.state = .disconnected;
@@ -255,6 +266,174 @@ pub const Connection = struct {
 };
 
 pub const SendError = error{NotConnected} || std.mem.Allocator.Error;
+
+// ============================================================
+// Real WebSocket Transport (backed by websocket.zig)
+// ============================================================
+
+/// Real WebSocket transport using Karl Seguin's websocket.zig library.
+/// Wraps ws.Client to implement the abstract Transport interface.
+pub const WsTransport = struct {
+    allocator: std.mem.Allocator,
+    client: ws.Client,
+
+    pub const ConnectError = error{
+        ConnectionFailed,
+        HandshakeFailed,
+    } || std.mem.Allocator.Error;
+
+    /// Connect to a SpacetimeDB WebSocket endpoint.
+    /// `host` is just the hostname (e.g. "localhost"), `port` is the port number.
+    /// `path` is the full path including query string.
+    /// `token` is an optional JWT for authentication.
+    pub fn connect(
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        path: []const u8,
+        token: ?[]const u8,
+    ) !WsTransport {
+        var client = ws.Client.init(allocator, .{
+            .port = port,
+            .host = host,
+        }) catch return error.ConnectionFailed;
+        errdefer client.deinit();
+
+        // Build headers: subprotocol + optional auth
+        const headers = try buildHeaders(allocator, token);
+        defer allocator.free(headers);
+
+        client.handshake(path, .{
+            .timeout_ms = 10000,
+            .headers = headers,
+        }) catch return error.HandshakeFailed;
+
+        return .{
+            .allocator = allocator,
+            .client = client,
+        };
+    }
+
+    /// Connect using a Config struct (convenience).
+    pub fn connectFromConfig(allocator: std.mem.Allocator, config: Config) !WsTransport {
+        // Parse host and port from config.host (e.g. "localhost:3000")
+        const host_port = parseHostPort(config.host);
+
+        const compression_str = switch (config.compression) {
+            .none => "None",
+            .gzip => "Gzip",
+            .brotli => "Brotli",
+        };
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "/v1/database/{s}/subscribe?compression={s}",
+            .{ config.database, compression_str },
+        );
+        defer allocator.free(path);
+
+        return connect(allocator, host_port.host, host_port.port, path, config.token);
+    }
+
+    pub fn deinit(self: *WsTransport) void {
+        self.client.close(.{}) catch {};
+        self.client.deinit();
+    }
+
+    /// Get the abstract Transport interface for use with Connection.
+    pub fn transport(self: *WsTransport) Transport {
+        return .{
+            .ptr = @ptrCast(self),
+            .vtable = &vtable,
+        };
+    }
+
+    const vtable = VTable{
+        .send = @ptrCast(&sendImpl),
+        .receive = @ptrCast(&receiveImpl),
+        .close = @ptrCast(&closeImpl),
+        .isOpen = @ptrCast(&isOpenImpl),
+    };
+
+    const VTable = Transport.VTable;
+
+    fn sendImpl(self: *WsTransport, data: []const u8) !void {
+        // websocket.zig requires mutable data for masking in-place
+        const mutable = try self.allocator.dupe(u8, data);
+        defer self.allocator.free(mutable);
+        try self.client.writeBin(mutable);
+    }
+
+    fn receiveImpl(self: *WsTransport) !?[]const u8 {
+        const message = (try self.client.read()) orelse return null;
+        defer self.client.done(message);
+
+        switch (message.type) {
+            .binary => {
+                // Copy the data since the reader buffer is reused
+                return try self.allocator.dupe(u8, message.data);
+            },
+            .text => {
+                return try self.allocator.dupe(u8, message.data);
+            },
+            .ping => {
+                // Auto-respond with pong (websocket.zig does this if no handler)
+                return null;
+            },
+            .close => {
+                return null;
+            },
+            .pong => return null,
+        }
+    }
+
+    fn closeImpl(self: *WsTransport) void {
+        self.client.close(.{}) catch {};
+    }
+
+    fn isOpenImpl(self: *WsTransport) bool {
+        _ = self;
+        // websocket.zig doesn't expose a simple isOpen check;
+        // we rely on send/receive errors to detect closure.
+        return true;
+    }
+};
+
+/// Parse "host:port" string into components.
+pub const HostPort = struct {
+    host: []const u8,
+    port: u16,
+};
+
+pub fn parseHostPort(host_str: []const u8) HostPort {
+    if (std.mem.lastIndexOfScalar(u8, host_str, ':')) |colon_pos| {
+        const port_str = host_str[colon_pos + 1 ..];
+        const port = std.fmt.parseInt(u16, port_str, 10) catch 80;
+        return .{
+            .host = host_str[0..colon_pos],
+            .port = port,
+        };
+    }
+    return .{
+        .host = host_str,
+        .port = 80,
+    };
+}
+
+/// Build the WebSocket handshake headers string.
+fn buildHeaders(allocator: std.mem.Allocator, token: ?[]const u8) ![]u8 {
+    if (token) |t| {
+        return std.fmt.allocPrint(
+            allocator,
+            "Sec-WebSocket-Protocol: {s}\r\nAuthorization: Bearer {s}\r\n",
+            .{ WS_SUBPROTOCOL, t },
+        );
+    }
+    return std.fmt.allocPrint(
+        allocator,
+        "Sec-WebSocket-Protocol: {s}\r\n",
+        .{WS_SUBPROTOCOL},
+    );
+}
 
 // ============================================================
 // Tests
@@ -493,6 +672,38 @@ test "Connection processFrame InitialConnection" {
     try std.testing.expect(conn.state == .authenticated);
     try std.testing.expectEqualSlices(u8, &identity, &conn.identity.?);
     try std.testing.expectEqualStrings("test-token-123", conn.token.?);
+}
+
+test "parseHostPort with port" {
+    const hp = parseHostPort("localhost:3000");
+    try std.testing.expectEqualStrings("localhost", hp.host);
+    try std.testing.expectEqual(@as(u16, 3000), hp.port);
+}
+
+test "parseHostPort without port" {
+    const hp = parseHostPort("example.com");
+    try std.testing.expectEqualStrings("example.com", hp.host);
+    try std.testing.expectEqual(@as(u16, 80), hp.port);
+}
+
+test "buildHeaders without token" {
+    const allocator = std.testing.allocator;
+    const headers = try buildHeaders(allocator, null);
+    defer allocator.free(headers);
+    try std.testing.expectEqualStrings(
+        "Sec-WebSocket-Protocol: v2.bsatn.spacetimedb\r\n",
+        headers,
+    );
+}
+
+test "buildHeaders with token" {
+    const allocator = std.testing.allocator;
+    const headers = try buildHeaders(allocator, "my-jwt");
+    defer allocator.free(headers);
+    try std.testing.expectEqualStrings(
+        "Sec-WebSocket-Protocol: v2.bsatn.spacetimedb\r\nAuthorization: Bearer my-jwt\r\n",
+        headers,
+    );
 }
 
 test "Connection recordDisconnect" {

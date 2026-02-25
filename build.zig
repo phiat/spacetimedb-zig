@@ -4,11 +4,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // External dependency: websocket.zig
+    const websocket_dep = b.dependency("websocket", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const websocket_mod = websocket_dep.module("websocket");
+
     // Main library module
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "websocket", .module = websocket_mod },
+        },
     });
 
     // Static library artifact
@@ -24,6 +34,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "websocket", .module = websocket_mod },
+            },
         }),
     });
     const run_lib_tests = b.addRunArtifact(lib_tests);
@@ -38,6 +51,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "websocket", .module = websocket_mod },
+            },
         }),
     });
     const check_step = b.step("check", "Check for compilation errors");
