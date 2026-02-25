@@ -60,6 +60,29 @@ pub fn build(b: *std.Build) void {
     const integration_step = b.step("integration-test", "Run integration tests (requires live SpacetimeDB)");
     integration_step.dependOn(&run_integration_tests.step);
 
+    // Codegen CLI executable
+    const codegen_exe = b.addExecutable(.{
+        .name = "spacetimedb-codegen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/codegen_cli.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "spacetimedb", .module = lib_mod },
+                .{ .name = "websocket", .module = websocket_mod },
+            },
+        }),
+    });
+    b.installArtifact(codegen_exe);
+
+    const run_codegen = b.addRunArtifact(codegen_exe);
+    run_codegen.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_codegen.addArgs(args);
+    }
+    const codegen_step = b.step("codegen", "Generate Zig source from SpacetimeDB schema");
+    codegen_step.dependOn(&run_codegen.step);
+
     // Check step (fast type-checking)
     const check = b.addLibrary(.{
         .name = "spacetimedb",

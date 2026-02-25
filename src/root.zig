@@ -13,6 +13,7 @@ pub const client_cache = @import("client_cache.zig");
 pub const websocket = @import("websocket.zig");
 pub const http_client = @import("http_client.zig");
 pub const table = @import("table.zig");
+pub const codegen = @import("codegen.zig");
 pub const client = @import("client.zig");
 
 test {
@@ -24,6 +25,7 @@ test {
     _ = value_encoder;
     _ = client_cache;
     _ = table;
+    _ = codegen;
     _ = websocket;
     _ = http_client;
     _ = client;
