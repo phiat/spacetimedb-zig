@@ -3,6 +3,7 @@
 
 # Claude Code memory
 .claude/
+AGENTS.md
 
 # Zig build artifacts
 zig-out/
@@ -15,6 +16,9 @@ zig-cache/
 *.swp
 *.swo
 *~
+
+# Build artifacts
+test_io
 
 # OS
 .DS_Store
