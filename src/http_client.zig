@@ -70,7 +70,7 @@ pub fn buildSqlUrl(allocator: std.mem.Allocator, config: Config) ![]u8 {
 
 /// Build the ping URL.
 pub fn buildPingUrl(allocator: std.mem.Allocator, host: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "http://{s}/ping", .{host});
+    return std.fmt.allocPrint(allocator, "http://{s}/v1/ping", .{host});
 }
 
 /// Build an Authorization header value.
@@ -141,7 +141,7 @@ pub const Client = struct {
     }
 
     /// Create a new identity. Returns the JSON response body (caller owns).
-    pub fn createIdentity(self: *Client) ![]u8 {
+    pub fn createIdentity(self: *Client) ![]const u8 {
         const url = try buildIdentityUrl(self.allocator, self.config.host);
         defer self.allocator.free(url);
 
@@ -252,7 +252,7 @@ test "buildPingUrl" {
     const url = try buildPingUrl(allocator, "localhost:3000");
     defer allocator.free(url);
     try std.testing.expectEqualStrings(
-        "http://localhost:3000/ping",
+        "http://localhost:3000/v1/ping",
         url,
     );
 }
@@ -282,6 +282,70 @@ test "Response isSuccess" {
     try std.testing.expect(r204.isSuccess());
     r204.deinit();
 }
+
+/// Real HTTP transport using Zig's std.http.Client.
+pub const StdHttpTransport = struct {
+    pub fn transport(self: *StdHttpTransport) HttpTransport {
+        return .{
+            .ptr = @ptrCast(self),
+            .vtable = &.{
+                .get = @ptrCast(&doGet),
+                .post = @ptrCast(&doPost),
+            },
+        };
+    }
+
+    fn doGet(_: *StdHttpTransport, allocator: std.mem.Allocator, url: []const u8, auth: ?[]const u8) !Response {
+        return doRequest(allocator, url, .GET, null, auth);
+    }
+
+    fn doPost(_: *StdHttpTransport, allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, auth: ?[]const u8) !Response {
+        return doRequest(allocator, url, .POST, body, auth);
+    }
+
+    fn doRequest(
+        allocator: std.mem.Allocator,
+        url_str: []const u8,
+        method: std.http.Method,
+        body: ?[]const u8,
+        auth: ?[]const u8,
+    ) !Response {
+        var client: std.http.Client = .{ .allocator = allocator };
+        defer client.deinit();
+
+        var resp_writer = std.Io.Writer.Allocating.init(allocator);
+        defer resp_writer.deinit();
+
+        // Zig 0.15 asserts POST must have a body; use empty string if null
+        const payload: ?[]const u8 = body orelse if (method == .POST) "" else null;
+
+        const result = client.fetch(.{
+            .location = .{ .url = url_str },
+            .method = method,
+            .payload = payload,
+            .extra_headers = if (auth) |a|
+                &.{.{ .name = "authorization", .value = a }}
+            else
+                &.{},
+            .response_writer = &resp_writer.writer,
+        }) catch return HttpError.ConnectionFailed;
+
+        const status: u16 = @intFromEnum(result.status);
+
+        // Take ownership of the collected body
+        var list = resp_writer.toArrayList();
+        const resp_body = list.toOwnedSlice(allocator) catch {
+            list.deinit(allocator);
+            return HttpError.InvalidResponse;
+        };
+
+        return .{
+            .status = status,
+            .body = resp_body,
+            .allocator = allocator,
+        };
+    }
+};
 
 /// Mock transport for testing.
 const MockHttpTransport = struct {

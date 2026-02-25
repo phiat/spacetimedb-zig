@@ -23,6 +23,7 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 8. **websocket.zig** — WebSocket connection state machine (abstract transport)
 9. **http_client.zig** — HTTP REST client (abstract transport)
 10. **client.zig** — High-level client API: connect, subscribe, call reducers, query
+11. **integration_test.zig** — End-to-end tests against live SpacetimeDB (`zig build integration-test`)
 
 ### Key Design Decisions
 - Zig 0.15 removed `async`/`await` — use thread-based concurrency (`std.Thread`)
@@ -31,12 +32,34 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 - WebSocket via `websocket.zig` (Karl Seguin) or similar dependency
 - Allocator-explicit API (Zig convention): all public functions take `std.mem.Allocator`
 
-### Zig 0.15 Gotchas
-- `@typeInfo` tags are lowercase: `.int`, `.@"struct"`, `.@"enum"`
-- `ArrayListUnmanaged` replaces `ArrayList` (allocator per-call)
-- New I/O: `std.fs.File.stdout().writer(&buf)` pattern
-- `addExecutable` requires `root_module = b.createModule(...)` in build.zig
-- Lossy int-to-float coercion is a compile error
+### Zig 0.15.2 Critical API Changes
+
+**These are NOT obvious and cause subtle compile errors. Read carefully.**
+
+- **`@typeInfo` tags are lowercase**: `.int`, `.@"struct"`, `.@"enum"` (not `.Int`, `.Struct`)
+- **`ArrayListUnmanaged` replaces `ArrayList`**: allocator passed per-call, not at init
+- **`addExecutable` / `addTest` require `root_module`**: `b.addTest(.{ .root_module = b.createModule(.{ ... }) })`
+- **Lossy int-to-float coercion is a compile error**: explicit `@floatFromInt()` required
+- **No `async`/`await`**: removed entirely; use `std.Thread` for concurrency
+- **No `usingnamespace`**: all imports must be explicit
+
+**HTTP Client (`std.http.Client`) — completely rewritten in 0.15:**
+- There is NO `client.open()` method. Use `client.fetch()` or `client.request()`.
+- `fetch()` uses `FetchOptions` with `.location = .{ .url = "..." }` (not a URI)
+- Response body collection: use `std.Io.Writer.Allocating.init(allocator)`, pass `&allocating.writer` as `response_writer`
+- `fetch()` asserts POST must have a body — pass `""` (empty string) not `null` for bodyless POST
+- Old pattern `req.send() / req.wait() / req.reader()` does NOT exist
+
+**I/O system (`std.Io`) — VTable-based, replaces old Reader/Writer:**
+- `std.Io.Writer` is a VTable struct, not generic over backing type
+- `std.Io.Writer.Allocating` wraps a Writer with heap-growing buffer
+- Create: `var w = std.Io.Writer.Allocating.init(allocator);` then use `w.writer`
+- Extract data: `var list = w.toArrayList(); const slice = list.toOwnedSlice(allocator);`
+
+**Build system:**
+- `build.zig.zon`: `.name` must be a valid Zig identifier (no hyphens)
+- `.fingerprint` field in `build.zig.zon` must match what zig generates
+- Module imports: `.imports = &.{ .{ .name = "dep", .module = dep_mod } }`
 
 ## Quick Reference
 
@@ -47,7 +70,8 @@ bd update <id> --status in_progress  # Claim work
 bd close <id>         # Complete work
 bd sync               # Sync with git
 just build            # Build the project
-just test             # Run tests
+just test             # Run unit tests
+just integration-test # Run integration tests (requires live SpacetimeDB at :3000)
 just check            # Type-check without codegen
 ```
 

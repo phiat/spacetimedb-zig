@@ -19,6 +19,10 @@ test:
 test-verbose:
     zig build test -- --verbose
 
+# Run integration tests (requires live SpacetimeDB at localhost:3000)
+integration-test:
+    zig build integration-test
+
 # Type-check without full codegen (fast feedback)
 check:
     zig build check

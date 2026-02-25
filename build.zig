@@ -44,6 +44,22 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_tests.step);
 
+    // Integration tests (require live SpacetimeDB at localhost:3000)
+    const integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/integration_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "websocket", .module = websocket_mod },
+            },
+        }),
+    });
+    const run_integration_tests = b.addRunArtifact(integration_tests);
+
+    const integration_step = b.step("integration-test", "Run integration tests (requires live SpacetimeDB)");
+    integration_step.dependOn(&run_integration_tests.step);
+
     // Check step (fast type-checking)
     const check = b.addLibrary(.{
         .name = "spacetimedb",

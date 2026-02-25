@@ -101,6 +101,7 @@ pub const Connection = struct {
     config: Config,
     state: ConnectionState,
     transport: ?Transport,
+    owned_transport: ?*WsTransport = null,
     identity: ?Identity,
     connection_id: ?ConnectionId,
     token: ?[]const u8,
@@ -114,6 +115,7 @@ pub const Connection = struct {
             .config = config,
             .state = .disconnected,
             .transport = null,
+            .owned_transport = null,
             .identity = null,
             .connection_id = null,
             .token = config.token,
@@ -124,9 +126,14 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
-        if (self.transport) |t| {
+        if (self.owned_transport) |wt| {
+            wt.deinit();
+            self.allocator.destroy(wt);
+            self.owned_transport = null;
+        } else if (self.transport) |t| {
             t.close();
         }
+        self.transport = null;
         self.state = .disconnected;
     }
 
@@ -250,11 +257,17 @@ pub const Connection = struct {
         errdefer self.allocator.destroy(ws_transport);
         ws_transport.* = try WsTransport.connectFromConfig(self.allocator, self.config);
         self.connect(ws_transport.transport());
+        self.owned_transport = ws_transport;
     }
 
     /// Record a disconnect and increment attempt counter.
     pub fn recordDisconnect(self: *Connection) Event {
         self.state = .disconnected;
+        if (self.owned_transport) |wt| {
+            wt.deinit();
+            self.allocator.destroy(wt);
+            self.owned_transport = null;
+        }
         self.transport = null;
         const attempt = self.reconnect_attempts;
         self.reconnect_attempts += 1;
