@@ -72,12 +72,16 @@ fn encodeInto(enc: *Encoder, allocator: std.mem.Allocator, value: AlgebraicValue
                 try encodeInto(enc, allocator, field_val, col.type);
             }
         },
-        .sum => {
+        .sum => |variants| {
             const s = value.sum;
             try enc.encodeU8(allocator, s.tag);
-            // For sum encoding, we'd need the variant's type from the sum definition
-            // For now, encode the value using encodeValue which dispatches by runtime tag
-            try enc.encodeValue(allocator, s.value.*);
+            // Use the schema's variant type for the active tag
+            if (s.tag < variants.len) {
+                try encodeInto(enc, allocator, s.value.*, variants[s.tag].type);
+            } else {
+                // Fallback: tag out of range, encode by runtime type
+                try enc.encodeValue(allocator, s.value.*);
+            }
         },
         .ref => unreachable, // Must be resolved before encoding
     }

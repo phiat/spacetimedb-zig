@@ -137,7 +137,13 @@ pub const Client = struct {
         const url = try buildSchemaUrl(self.allocator, self.config);
         defer self.allocator.free(url);
 
-        const resp = try self.transport.get(self.allocator, url, self.config.token);
+        var auth_header: ?[]u8 = null;
+        if (self.config.token) |t| {
+            auth_header = try buildAuthHeader(self.allocator, t);
+        }
+        defer if (auth_header) |h| self.allocator.free(h);
+
+        const resp = try self.transport.get(self.allocator, url, auth_header);
         defer resp.deinit();
 
         if (!resp.isSuccess()) return HttpError.RequestFailed;

@@ -476,3 +476,25 @@ test "typed row list decode" {
     try std.testing.expectEqual(@as(u64, 1), rows[0].id);
     try std.testing.expectEqual(@as(u64, 2), rows[1].id);
 }
+
+test "decodeRow errdefer frees already-decoded fields on failure" {
+    // Verifies that comptime var errdefer cleanup works correctly:
+    // encode a valid string field, then truncate so the next field fails.
+    // The string from field 1 must be freed (no leak).
+    const allocator = std.testing.allocator;
+
+    const TwoStrings = struct {
+        first: []const u8,
+        second: []const u8,
+    };
+
+    // Encode only one string, truncating before the second
+    var enc = Encoder.init();
+    defer enc.deinit(allocator);
+    try enc.encodeString(allocator, "hello");
+    // Don't encode second string — decodeRow should fail with BufferTooShort
+
+    const result = decodeRow(TwoStrings, allocator, enc.writtenSlice());
+    // Should fail, and the allocator leak detector verifies "hello" was freed
+    try std.testing.expectError(error.BufferTooShort, result);
+}
