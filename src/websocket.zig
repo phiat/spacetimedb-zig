@@ -106,6 +106,8 @@ pub const Connection = struct {
     identity: ?Identity,
     connection_id: ?ConnectionId,
     token: ?[]const u8,
+    /// If we duped the token from a frame, we own this memory.
+    owned_token: ?[]const u8 = null,
     next_request_id: u32,
     next_query_set_id: u32,
     reconnect_attempts: u32,
@@ -127,6 +129,10 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
+        if (self.owned_token) |t| {
+            self.allocator.free(t);
+            self.owned_token = null;
+        }
         if (self.owned_transport) |wt| {
             wt.deinit();
             self.allocator.destroy(wt);
@@ -238,12 +244,17 @@ pub const Connection = struct {
             .initial_connection => |ic| {
                 self.identity = ic.identity;
                 self.connection_id = ic.connection_id;
-                self.token = ic.token;
+                // ic.token points into the frame buffer (or decompressed buffer).
+                // Dupe so the token outlives the frame.
+                if (self.owned_token) |old| self.allocator.free(old);
+                const token_copy = try self.allocator.dupe(u8, ic.token);
+                self.token = token_copy;
+                self.owned_token = token_copy;
                 self.state = .authenticated;
                 return .{ .authenticated = .{
                     .identity = ic.identity,
                     .connection_id = ic.connection_id,
-                    .token = ic.token,
+                    .token = token_copy,
                 } };
             },
             else => return .{ .message = msg },
@@ -397,7 +408,9 @@ pub const WsTransport = struct {
                 return try self.allocator.dupe(u8, message.data);
             },
             .text => {
-                return try self.allocator.dupe(u8, message.data);
+                // SpacetimeDB v2 uses binary frames only. Text frames are
+                // error messages or protocol violations — skip them.
+                return null;
             },
             .ping => {
                 // Auto-respond with pong (websocket.zig does this if no handler)

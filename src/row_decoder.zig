@@ -16,7 +16,7 @@ const Decoder = bsatn.Decoder;
 const BsatnRowList = protocol.BsatnRowList;
 const RowSizeHint = protocol.RowSizeHint;
 
-pub const DecodeError = bsatn.Error || std.mem.Allocator.Error || error{UnknownType};
+pub const DecodeError = bsatn.Error || std.mem.Allocator.Error || error{ UnknownType, InvalidRowData };
 
 /// A decoded row: an array of named field values.
 pub const Row = struct {
@@ -90,7 +90,7 @@ pub fn splitRows(
     allocator: std.mem.Allocator,
     size_hint: RowSizeHint,
     data: []const u8,
-) std.mem.Allocator.Error![]const []const u8 {
+) DecodeError![]const []const u8 {
     return switch (size_hint) {
         .fixed_size => |size| splitFixed(allocator, data, size),
         .row_offsets => |offsets| splitByRowOffsets(allocator, data, offsets),
@@ -101,10 +101,11 @@ fn splitFixed(
     allocator: std.mem.Allocator,
     data: []const u8,
     size: u16,
-) std.mem.Allocator.Error![]const []const u8 {
+) DecodeError![]const []const u8 {
     if (size == 0 or data.len == 0) {
         return try allocator.alloc([]const u8, 0);
     }
+    if (data.len % size != 0) return error.InvalidRowData;
     const count = data.len / size;
     const result = try allocator.alloc([]const u8, count);
     for (result, 0..) |*row, i| {

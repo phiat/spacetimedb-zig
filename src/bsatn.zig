@@ -327,14 +327,19 @@ pub const Decoder = struct {
     }
 
     /// Decode a length-prefixed string. Returns a slice into the decoder's buffer.
+    /// Validates UTF-8 encoding.
     pub fn decodeString(self: *Decoder) Error![]const u8 {
         const len = try self.decodeU32();
-        return self.readBytes(len);
+        const slice = try self.readBytes(len);
+        if (!std.unicode.utf8ValidateSlice(slice)) return Error.InvalidUtf8;
+        return slice;
     }
 
     /// Decode length-prefixed bytes. Returns a slice into the decoder's buffer.
+    /// Unlike decodeString, does NOT validate UTF-8.
     pub fn decodeBytes(self: *Decoder) Error![]const u8 {
-        return self.decodeString();
+        const len = try self.decodeU32();
+        return self.readBytes(len);
     }
 
     // -- Composite decoders --

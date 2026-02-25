@@ -228,9 +228,17 @@ pub const ClientCache = struct {
             defer self.allocator.free(decoded);
 
             const store = try self.getOrCreateTable(tr.table_name);
+            var stored_count: usize = 0;
+            errdefer {
+                // Free rows that weren't stored in the cache
+                for (decoded[stored_count..]) |*r| {
+                    @constCast(r).deinit(self.allocator);
+                }
+            }
             for (decoded) |row| {
                 const pk = try self.extractPk(row, store.pk_col_indices);
                 try store.rows.put(self.allocator, pk, row);
+                stored_count += 1;
                 // Get pointer to stored row for callback
                 const stored = store.rows.getPtr(pk).?;
                 try changes.append(self.allocator, .{ .insert = .{

@@ -39,9 +39,62 @@ pub const Schema = struct {
     /// Owns the JSON parse tree; string slices in tables/reducers point into this.
     json_parsed: ?std.json.Parsed(std.json.Value) = null,
 
+    /// Free schema memory. Only frees heap-allocated data when the schema was
+    /// parsed from JSON (json_parsed is set). Manually-constructed schemas with
+    /// static slices should NOT call deinit — or use an ArenaAllocator.
+    ///
+    /// For schemas created via `parse()`, all string data borrows from the JSON
+    /// tree. Heap-allocated slices (typespace, tables, reducers, columns, pk
+    /// arrays) and AlgebraicType nodes are freed, then the JSON tree.
     pub fn deinit(self: *const Schema) void {
         if (self.json_parsed) |parsed| {
+            // Free typespace entries (heap AlgebraicType nodes)
+            for (self.typespace) |t| {
+                freeAlgebraicType(self.allocator, t);
+            }
+            if (self.typespace.len > 0) self.allocator.free(self.typespace);
+
+            // Free table definitions
+            for (self.tables) |table| {
+                if (table.columns.len > 0) self.allocator.free(table.columns);
+                if (table.primary_key.len > 0) self.allocator.free(table.primary_key);
+            }
+            if (self.tables.len > 0) self.allocator.free(self.tables);
+
+            // Free reducer definitions
+            for (self.reducers) |reducer| {
+                if (reducer.params.len > 0) self.allocator.free(reducer.params);
+            }
+            if (self.reducers.len > 0) self.allocator.free(self.reducers);
+
+            // Free the JSON parse tree (string data lives here)
             parsed.deinit();
+        }
+    }
+
+    fn freeAlgebraicType(allocator: std.mem.Allocator, t: *AlgebraicType) void {
+        switch (t.*) {
+            .array => |inner| freeAlgebraicType(allocator, @constCast(inner)),
+            .option => |inner| freeAlgebraicType(allocator, @constCast(inner)),
+            .product => |cols| {
+                for (@constCast(cols)) |*col| freeAlgebraicTypeValue(allocator, &col.type);
+                if (cols.len > 0) allocator.free(cols);
+            },
+            .sum => |cols| {
+                for (@constCast(cols)) |*col| freeAlgebraicTypeValue(allocator, &col.type);
+                if (cols.len > 0) allocator.free(cols);
+            },
+            else => {},
+        }
+        allocator.destroy(t);
+    }
+
+    fn freeAlgebraicTypeValue(allocator: std.mem.Allocator, t: *AlgebraicType) void {
+        switch (t.*) {
+            .array => |inner| freeAlgebraicType(allocator, @constCast(inner)),
+            .option => |inner| freeAlgebraicType(allocator, @constCast(inner)),
+            // product/sum cols inside value types are shared with typespace — don't double-free
+            else => {},
         }
     }
 
@@ -645,4 +698,15 @@ test "parse all primitive types" {
         const cols = s.columnsFor("t") orelse return error.TestUnexpectedResult;
         try std.testing.expect(cols[0].type == p.expected);
     }
+}
+
+test "schema deinit frees all allocations" {
+    const allocator = std.testing.allocator;
+
+    var s = try parse(allocator, raw_schema);
+    // Verify we parsed something
+    try std.testing.expectEqual(@as(usize, 1), s.tables.len);
+    try std.testing.expectEqual(@as(usize, 2), s.reducers.len);
+    // deinit should free everything without leaks
+    s.deinit();
 }
