@@ -231,7 +231,7 @@ pub const Decoder = struct {
         return self.data.len - self.pos;
     }
 
-    fn readBytes(self: *Decoder, n: usize) Error![]const u8 {
+    pub fn readBytes(self: *Decoder, n: usize) Error![]const u8 {
         if (self.pos + n > self.data.len) return Error.BufferTooShort;
         const slice = self.data[self.pos .. self.pos + n];
         self.pos += n;
