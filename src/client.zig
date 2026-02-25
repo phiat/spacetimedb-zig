@@ -57,6 +57,7 @@ pub const EventHandler = struct {
         onReducerResult: ?*const fn (ptr: *anyopaque, request_id: u32, result: protocol.ReducerOutcome) void = null,
         onUnsubscribeApplied: ?*const fn (ptr: *anyopaque, query_set_id: u32, rows: ?[]const protocol.TableRows) void = null,
         onQueryResult: ?*const fn (ptr: *anyopaque, request_id: u32, result: protocol.OneOffResult) void = null,
+        onTransaction: ?*const fn (ptr: *anyopaque, changes: []const RowChange) bool = null,
         onError: ?*const fn (ptr: *anyopaque, message: []const u8) void = null,
     };
 
@@ -94,6 +95,13 @@ pub const EventHandler = struct {
 
     pub fn onQueryResult(self: EventHandler, request_id: u32, result: protocol.OneOffResult) void {
         if (self.vtable.onQueryResult) |f| f(self.ptr, request_id, result);
+    }
+
+    /// Called with all changes from a transaction before per-row callbacks.
+    /// Return true to skip individual row callbacks, false to proceed.
+    pub fn onTransaction(self: EventHandler, changes: []const RowChange) bool {
+        if (self.vtable.onTransaction) |f| return f(self.ptr, changes);
+        return false;
     }
 
     pub fn onError(self: EventHandler, message: []const u8) void {
@@ -459,7 +467,11 @@ pub const SpacetimeClient = struct {
     }
 
     /// Dispatch row changes to the appropriate handler callbacks.
+    /// Calls onTransaction first; if it returns true, per-row callbacks are skipped.
     fn dispatchChanges(self: *SpacetimeClient, changes: []const RowChange) void {
+        const skip_row_callbacks = self.handler.onTransaction(changes);
+        if (skip_row_callbacks) return;
+
         for (changes) |change| {
             switch (change) {
                 .insert => |ins| self.handler.onInsert(ins.table_name, ins.row),
@@ -869,4 +881,84 @@ test "runThreaded exits on null receive (clean close)" {
 
     try std.testing.expect(Tracker.instance.disconnected);
     try std.testing.expect(client.connection.state == .disconnected);
+}
+
+test "onTransaction callback fires before per-row callbacks" {
+    const Tracker = struct {
+        transaction_changes: usize = 0,
+        row_callbacks: usize = 0,
+        var instance: @This() = .{};
+
+        fn onTransaction(_: *anyopaque, changes: []const RowChange) bool {
+            instance.transaction_changes = changes.len;
+            return false; // proceed with row callbacks
+        }
+        fn onInsert(_: *anyopaque, _: []const u8, _: *const Row) void {
+            instance.row_callbacks += 1;
+        }
+    };
+    Tracker.instance = .{};
+
+    const handler = EventHandler{
+        .ptr = @ptrCast(&Tracker.instance),
+        .vtable = &.{
+            .onTransaction = &Tracker.onTransaction,
+            .onInsert = &Tracker.onInsert,
+        },
+    };
+
+    const allocator = std.testing.allocator;
+    var client = SpacetimeClient.init(allocator, .{
+        .host = "localhost:3000",
+        .database = "test_db",
+    }, handler);
+    defer client.deinit();
+
+    // Simulate changes
+    const changes = [_]RowChange{
+        .{ .insert = .{ .table_name = "t", .row = undefined } },
+        .{ .insert = .{ .table_name = "t", .row = undefined } },
+    };
+    client.dispatchChanges(&changes);
+
+    try std.testing.expectEqual(@as(usize, 2), Tracker.instance.transaction_changes);
+    try std.testing.expectEqual(@as(usize, 2), Tracker.instance.row_callbacks);
+}
+
+test "onTransaction returning true skips row callbacks" {
+    const Tracker = struct {
+        row_callbacks: usize = 0,
+        var instance: @This() = .{};
+
+        fn onTransaction(_: *anyopaque, _: []const RowChange) bool {
+            return true; // skip row callbacks
+        }
+        fn onInsert(_: *anyopaque, _: []const u8, _: *const Row) void {
+            instance.row_callbacks += 1;
+        }
+    };
+    Tracker.instance = .{};
+
+    const handler = EventHandler{
+        .ptr = @ptrCast(&Tracker.instance),
+        .vtable = &.{
+            .onTransaction = &Tracker.onTransaction,
+            .onInsert = &Tracker.onInsert,
+        },
+    };
+
+    const allocator = std.testing.allocator;
+    var client = SpacetimeClient.init(allocator, .{
+        .host = "localhost:3000",
+        .database = "test_db",
+    }, handler);
+    defer client.deinit();
+
+    const changes = [_]RowChange{
+        .{ .insert = .{ .table_name = "t", .row = undefined } },
+    };
+    client.dispatchChanges(&changes);
+
+    // Row callbacks should NOT have fired
+    try std.testing.expectEqual(@as(usize, 0), Tracker.instance.row_callbacks);
 }

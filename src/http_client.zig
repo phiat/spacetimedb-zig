@@ -211,6 +211,88 @@ pub const Client = struct {
 
         return resp.isSuccess();
     }
+
+    // ============================================================
+    // Database management endpoints
+    // ============================================================
+
+    /// Get database metadata. Returns JSON response body (caller owns).
+    pub fn getDatabase(self: *Client, name_or_identity: []const u8) !Response {
+        const url = try std.fmt.allocPrint(self.allocator, "http://{s}/v1/database/{s}", .{ self.config.host, name_or_identity });
+        defer self.allocator.free(url);
+        return self.transport.get(self.allocator, url, null);
+    }
+
+    /// Get database identity hex string. Returns JSON response body (caller owns).
+    pub fn getDatabaseIdentity(self: *Client, name_or_identity: []const u8) !Response {
+        const url = try std.fmt.allocPrint(self.allocator, "http://{s}/v1/database/{s}/identity", .{ self.config.host, name_or_identity });
+        defer self.allocator.free(url);
+        return self.transport.get(self.allocator, url, null);
+    }
+
+    /// Publish a WASM module to a database.
+    pub fn publishDatabase(self: *Client, name_or_identity: []const u8, wasm_binary: []const u8, token: []const u8) !Response {
+        const url = try std.fmt.allocPrint(self.allocator, "http://{s}/v1/database/{s}", .{ self.config.host, name_or_identity });
+        defer self.allocator.free(url);
+        const auth = try buildAuthHeader(self.allocator, token);
+        defer self.allocator.free(auth);
+        return self.transport.post(self.allocator, url, wasm_binary, auth);
+    }
+
+    /// List all names for a database.
+    pub fn getDatabaseNames(self: *Client, name_or_identity: []const u8) !Response {
+        const url = try std.fmt.allocPrint(self.allocator, "http://{s}/v1/database/{s}/names", .{ self.config.host, name_or_identity });
+        defer self.allocator.free(url);
+        return self.transport.get(self.allocator, url, null);
+    }
+
+    /// Add a name to a database.
+    pub fn addDatabaseName(self: *Client, name_or_identity: []const u8, new_name: []const u8, token: []const u8) !Response {
+        const url = try std.fmt.allocPrint(self.allocator, "http://{s}/v1/database/{s}/names", .{ self.config.host, name_or_identity });
+        defer self.allocator.free(url);
+        const auth = try buildAuthHeader(self.allocator, token);
+        defer self.allocator.free(auth);
+        return self.transport.post(self.allocator, url, new_name, auth);
+    }
+
+    // ============================================================
+    // Logs and public key endpoints
+    // ============================================================
+
+    /// Fetch database logs. Returns log text (caller owns response).
+    pub fn getLogs(self: *Client, database: []const u8, token: []const u8, num_lines: ?u32) !Response {
+        const url = if (num_lines) |n|
+            try std.fmt.allocPrint(self.allocator, "http://{s}/v1/database/{s}/logs?num_lines={d}", .{ self.config.host, database, n })
+        else
+            try std.fmt.allocPrint(self.allocator, "http://{s}/v1/database/{s}/logs", .{ self.config.host, database });
+        defer self.allocator.free(url);
+        const auth = try buildAuthHeader(self.allocator, token);
+        defer self.allocator.free(auth);
+        return self.transport.get(self.allocator, url, auth);
+    }
+
+    /// Get the server's public key (PEM format) for token verification.
+    pub fn getPublicKey(self: *Client) !Response {
+        const url = try std.fmt.allocPrint(self.allocator, "http://{s}/v1/identity/public-key", .{self.config.host});
+        defer self.allocator.free(url);
+        return self.transport.get(self.allocator, url, null);
+    }
+
+    /// List databases owned by an identity.
+    pub fn getDatabases(self: *Client, identity_hex: []const u8) !Response {
+        const url = try std.fmt.allocPrint(self.allocator, "http://{s}/v1/identity/{s}/databases", .{ self.config.host, identity_hex });
+        defer self.allocator.free(url);
+        return self.transport.get(self.allocator, url, null);
+    }
+
+    /// Get a short-lived WebSocket token.
+    pub fn getWebSocketToken(self: *Client, token: []const u8) !Response {
+        const url = try std.fmt.allocPrint(self.allocator, "http://{s}/v1/identity/websocket-token", .{self.config.host});
+        defer self.allocator.free(url);
+        const auth = try buildAuthHeader(self.allocator, token);
+        defer self.allocator.free(auth);
+        return self.transport.post(self.allocator, url, null, auth);
+    }
 };
 
 // ============================================================
@@ -574,4 +656,125 @@ test "Client ping failure" {
 
     const result = try client.ping();
     try std.testing.expect(!result);
+}
+
+test "Client getDatabase" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "{\"identity\":\"abc\"}",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.getDatabase("my_db");
+    defer resp.deinit();
+    try std.testing.expect(resp.isSuccess());
+    try std.testing.expectEqualStrings("{\"identity\":\"abc\"}", resp.body);
+}
+
+test "Client getDatabaseIdentity" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "deadbeef",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.getDatabaseIdentity("my_db");
+    defer resp.deinit();
+    try std.testing.expect(resp.isSuccess());
+}
+
+test "Client publishDatabase" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "ok",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.publishDatabase("my_db", "fake-wasm", "my-token");
+    defer resp.deinit();
+    try std.testing.expect(resp.isSuccess());
+}
+
+test "Client getDatabaseNames" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "[\"name1\",\"name2\"]",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.getDatabaseNames("my_db");
+    defer resp.deinit();
+    try std.testing.expectEqualStrings("[\"name1\",\"name2\"]", resp.body);
+}
+
+test "Client addDatabaseName" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "ok",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.addDatabaseName("my_db", "new_name", "my-token");
+    defer resp.deinit();
+    try std.testing.expect(resp.isSuccess());
+}
+
+test "Client getLogs" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "log line 1\nlog line 2",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.getLogs("my_db", "my-token", 100);
+    defer resp.deinit();
+    try std.testing.expectEqualStrings("log line 1\nlog line 2", resp.body);
+}
+
+test "Client getLogs without num_lines" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "all logs",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.getLogs("my_db", "my-token", null);
+    defer resp.deinit();
+    try std.testing.expect(resp.isSuccess());
+}
+
+test "Client getPublicKey" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "-----BEGIN PUBLIC KEY-----\nMIIB...\n-----END PUBLIC KEY-----",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.getPublicKey();
+    defer resp.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, resp.body, "-----BEGIN PUBLIC KEY-----"));
+}
+
+test "Client getDatabases" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "[{\"name\":\"db1\"}]",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.getDatabases("abc123hex");
+    defer resp.deinit();
+    try std.testing.expect(resp.isSuccess());
+}
+
+test "Client getWebSocketToken" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport{
+        .response_status = 200,
+        .response_body = "{\"token\":\"ws-token-xyz\"}",
+    };
+    var client = Client.init(allocator, .{ .host = "localhost:3000", .database = "test" }, mock.transport());
+    const resp = try client.getWebSocketToken("my-jwt");
+    defer resp.deinit();
+    try std.testing.expectEqualStrings("{\"token\":\"ws-token-xyz\"}", resp.body);
 }

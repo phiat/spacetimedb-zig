@@ -11,8 +11,11 @@
 
 const std = @import("std");
 const flate = std.compress.flate;
+const build_options = @import("build_options");
 const bsatn = @import("bsatn.zig");
 const types = @import("types.zig");
+
+const brotli = if (build_options.enable_brotli) @cImport(@cInclude("brotli/decode.h")) else struct {};
 
 const Encoder = bsatn.Encoder;
 const Decoder = bsatn.Decoder;
@@ -62,9 +65,67 @@ pub fn decompress(allocator: std.mem.Allocator, frame: []const u8) Error!Decompr
                 return Error.DecompressionFailed;
             return .{ .data = decompressed, .allocated = true };
         },
-        0x01 => Error.DecompressionFailed, // Brotli not supported
+        0x01 => {
+            if (comptime build_options.enable_brotli) {
+                return decompressBrotli(allocator, payload);
+            } else {
+                return Error.DecompressionFailed; // Brotli not enabled — build with -Denable-brotli=true
+            }
+        },
         else => Error.UnknownCompression,
     };
+}
+
+/// Decompress brotli data using libbrotlidec.
+/// Only available when built with -Denable-brotli=true.
+fn decompressBrotli(allocator: std.mem.Allocator, payload: []const u8) Error!DecompressResult {
+    if (comptime !build_options.enable_brotli) unreachable;
+
+    const state = brotli.BrotliDecoderCreateInstance(null, null, null) orelse
+        return Error.DecompressionFailed;
+    defer brotli.BrotliDecoderDestroyInstance(state);
+
+    var output = std.ArrayListUnmanaged(u8){};
+    errdefer output.deinit(allocator);
+
+    var avail_in: usize = payload.len;
+    var next_in: [*c]const u8 = payload.ptr;
+
+    while (true) {
+        // Grow output buffer in chunks
+        const chunk_size: usize = if (output.items.len == 0)
+            @max(payload.len * 4, 4096)
+        else
+            output.items.len;
+
+        output.ensureUnusedCapacity(allocator, chunk_size) catch
+            return Error.DecompressionFailed;
+
+        var avail_out: usize = output.capacity - output.items.len;
+        var next_out: [*c]u8 = output.items.ptr + output.items.len;
+
+        const result = brotli.BrotliDecoderDecompressStream(
+            state,
+            &avail_in,
+            &next_in,
+            &avail_out,
+            &next_out,
+            null,
+        );
+
+        // Update length based on how much was written
+        output.items.len = @intFromPtr(next_out) - @intFromPtr(output.items.ptr);
+
+        switch (result) {
+            brotli.BROTLI_DECODER_RESULT_SUCCESS => {
+                const decompressed = output.toOwnedSlice(allocator) catch
+                    return Error.DecompressionFailed;
+                return .{ .data = decompressed, .allocated = true };
+            },
+            brotli.BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT => continue,
+            else => return Error.DecompressionFailed,
+        }
+    }
 }
 
 pub const DecompressResult = struct {
@@ -853,4 +914,37 @@ test "decompress gzip" {
 
     try std.testing.expect(result.allocated);
     try std.testing.expectEqualStrings("Hello SpacetimeDB gzip test", result.data);
+}
+
+test "decompress brotli" {
+    if (comptime !build_options.enable_brotli) return; // skip when brotli not enabled
+
+    const allocator = std.testing.allocator;
+
+    // Pre-compressed brotli of "hello world from brotli"
+    const br_data = [_]u8{
+        0x0b, 0x0b, 0x80, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72,
+        0x6c, 0x64, 0x20, 0x66, 0x72, 0x6f, 0x6d, 0x20, 0x62, 0x72, 0x6f, 0x74,
+        0x6c, 0x69, 0x03,
+    };
+
+    // Build frame: 0x01 brotli tag + compressed data
+    var frame: [1 + br_data.len]u8 = undefined;
+    frame[0] = 0x01;
+    @memcpy(frame[1..], &br_data);
+
+    const result = try decompress(allocator, &frame);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.allocated);
+    try std.testing.expectEqualStrings("hello world from brotli", result.data);
+}
+
+test "decompress brotli returns error when disabled" {
+    if (comptime build_options.enable_brotli) return; // skip when brotli is enabled
+
+    const allocator = std.testing.allocator;
+    const frame = [_]u8{ 0x01, 0x00 }; // brotli tag + dummy payload
+    const result = decompress(allocator, &frame);
+    try std.testing.expectError(Error.DecompressionFailed, result);
 }
