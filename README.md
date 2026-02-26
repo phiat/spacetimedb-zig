@@ -20,7 +20,7 @@ Connects to [SpacetimeDB](https://spacetimedb.com) via the v2 BSATN binary WebSo
 | `http_client.zig` | HTTP REST client for all v1 API endpoints |
 | `table.zig` | Comptime typed table access (BSATN ↔ Zig structs) |
 | `codegen.zig` | Code generation from schema |
-| `zig build codegen` | CLI to generate structs and reducers from a live database |
+| `codegen_cli.zig` | CLI entry point (`zig build codegen`) |
 
 ## Installation
 
@@ -29,6 +29,7 @@ Add to your `build.zig.zon` dependencies:
 ```zig
 .spacetimedb_zig = .{
     .url = "https://github.com/phiat/spacetimedb-zig/archive/refs/heads/main.tar.gz",
+    // Run `zig build` once; the compiler will provide the correct .hash value
 },
 ```
 
@@ -105,12 +106,16 @@ All callbacks are optional:
 | Callback | When it fires |
 |----------|---------------|
 | `onConnect(identity, conn_id, token)` | Initial connection established |
-| `onSubscribeApplied(table, rows)` | Subscription data arrives |
-| `onInsert(table, row)` | Row inserted |
-| `onDelete(table, row)` | Row deleted |
-| `onUpdate(table, old_row, new_row)` | Row replaced (same PK deleted + inserted) |
+| `onSubscribeApplied(table_name, row_count)` | Subscription data arrives |
+| `onUnsubscribeApplied(query_set_id, rows)` | Unsubscription confirmed (rows optionally returned) |
+| `onInsert(table_name, row)` | Row inserted |
+| `onDelete(table_name, row)` | Row deleted |
+| `onUpdate(table_name, old_row, new_row)` | Row replaced (same PK deleted + inserted) |
 | `onTransaction(changes)` | Full transaction — return `true` to suppress per-row callbacks |
 | `onReducerResult(request_id, result)` | Reducer completes |
+| `onQueryResult(request_id, result)` | One-off SQL query completes |
+| `onProcedureResult(request_id, status)` | Procedure call completes |
+| `onError(message)` | Protocol or transport error |
 | `onDisconnect(reason)` | Disconnected |
 
 ### Typed Table Access
