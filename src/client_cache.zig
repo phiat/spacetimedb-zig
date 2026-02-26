@@ -128,15 +128,18 @@ pub const ClientCache = struct {
     pub fn deinit(self: *ClientCache) void {
         var it = self.tables.iterator();
         while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(self.allocator);
         }
         self.tables.deinit(self.allocator);
     }
 
     /// Get a table store, creating it if needed.
+    /// The key is duped so the cache owns it (protocol slices are transient).
     fn getOrCreateTable(self: *ClientCache, table_name: []const u8) !*TableStore {
         const gop = try self.tables.getOrPut(self.allocator, table_name);
         if (!gop.found_existing) {
+            gop.key_ptr.* = try self.allocator.dupe(u8, table_name);
             gop.value_ptr.* = TableStore.init();
             // Resolve PK indices from schema
             if (self.table_schema.primaryKeyFor(table_name)) |pk_indices| {
