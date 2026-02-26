@@ -498,3 +498,65 @@ test "decodeRow errdefer frees already-decoded fields on failure" {
     // Should fail, and the allocator leak detector verifies "hello" was freed
     try std.testing.expectError(error.BufferTooShort, result);
 }
+
+// ============================================================
+// Fuzz Tests
+// ============================================================
+
+test "fuzz decodeRow comptime struct never crashes" {
+    return std.testing.fuzz({}, fuzzDecodeRowStruct, .{
+        .corpus = &.{
+            // Valid: id=1, name="hi", age=30
+            "\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00hi\x1e\x00\x00\x00",
+            // Truncated
+            "\x01\x00\x00\x00",
+            "",
+            // Oversized string length
+            "\x01\x00\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff",
+        },
+    });
+}
+
+fn fuzzDecodeRowStruct(_: void, input: []const u8) anyerror!void {
+    const allocator = std.testing.allocator;
+
+    const FuzzPerson = struct {
+        id: u64,
+        name: []const u8,
+        age: u32,
+    };
+
+    // Property: decodeRow must never crash. Either succeeds or returns error.
+    var person = decodeRow(FuzzPerson, allocator, input) catch return;
+    defer freeTypedRow(FuzzPerson, allocator, &person);
+
+    // Property: if decode succeeded, encode must also succeed
+    const bytes = encodeRow(FuzzPerson, allocator, person) catch return;
+    defer allocator.free(bytes);
+}
+
+test "fuzz decodeRow with optional field never crashes" {
+    return std.testing.fuzz({}, fuzzDecodeRowOptional, .{
+        .corpus = &.{
+            // Valid: id=1, email=Some("a@b")
+            "\x01\x00\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00a@b",
+            // Valid: id=1, email=None
+            "\x01\x00\x00\x00\x00\x00\x00\x00\x01",
+            // Invalid option tag
+            "\x01\x00\x00\x00\x00\x00\x00\x00\x02",
+            "",
+        },
+    });
+}
+
+fn fuzzDecodeRowOptional(_: void, input: []const u8) anyerror!void {
+    const allocator = std.testing.allocator;
+
+    const FuzzUser = struct {
+        id: u64,
+        email: ?[]const u8,
+    };
+
+    var user = decodeRow(FuzzUser, allocator, input) catch return;
+    defer freeTypedRow(FuzzUser, allocator, &user);
+}

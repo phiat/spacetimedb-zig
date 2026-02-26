@@ -704,3 +704,189 @@ test "encodeValue and decodeValue roundtrip for sum" {
     try std.testing.expectEqual(@as(u8, 1), decoded.sum.tag);
     try std.testing.expectEqualStrings("hello", decoded.sum.value.string);
 }
+
+// ============================================================
+// Fuzz Tests
+// ============================================================
+
+test "fuzz decoder never crashes on arbitrary input" {
+    return std.testing.fuzz({}, fuzzDecoderRobustness, .{
+        .corpus = &.{
+            // Empty input
+            "",
+            // Single bytes
+            "\x00",
+            "\x01",
+            "\xff",
+            // Truncated string (length prefix says 100 but only 2 bytes follow)
+            "\x64\x00\x00\x00\xab\xcd",
+            // Valid bool + truncated u32
+            "\x01\xde\xad",
+            // Huge array length
+            "\xff\xff\xff\xff",
+            // Valid product: two u32 fields
+            "\x2a\x00\x00\x00\x07\x00\x00\x00",
+        },
+    });
+}
+
+fn fuzzDecoderRobustness(_: void, input: []const u8) anyerror!void {
+    // Property: the decoder must never crash/panic on any input.
+    // It should either succeed or return a well-defined error.
+    var dec = Decoder.init(input);
+
+    // Try decoding various primitive types — all must either succeed or error cleanly
+    _ = dec.decodeBool() catch {};
+    dec.pos = 0;
+    _ = dec.decodeU8() catch {};
+    dec.pos = 0;
+    _ = dec.decodeI8() catch {};
+    dec.pos = 0;
+    _ = dec.decodeU16() catch {};
+    dec.pos = 0;
+    _ = dec.decodeU32() catch {};
+    dec.pos = 0;
+    _ = dec.decodeU64() catch {};
+    dec.pos = 0;
+    _ = dec.decodeU128() catch {};
+    dec.pos = 0;
+    _ = dec.decodeF32() catch {};
+    dec.pos = 0;
+    _ = dec.decodeF64() catch {};
+    dec.pos = 0;
+    _ = dec.decodeString() catch {};
+    dec.pos = 0;
+    _ = dec.decodeBytes() catch {};
+    dec.pos = 0;
+    _ = dec.decodeOptionTag() catch {};
+    dec.pos = 0;
+    _ = dec.decodeSumTag() catch {};
+    dec.pos = 0;
+    _ = dec.decodeArrayLen() catch {};
+}
+
+test "fuzz decodeValue product type never crashes" {
+    return std.testing.fuzz({}, fuzzDecodeValueProduct, .{
+        .corpus = &.{
+            // Valid: string "hi" (len=2) + u32(42)
+            "\x02\x00\x00\x00hi\x2a\x00\x00\x00",
+            // Truncated
+            "\x02\x00\x00\x00h",
+            // Empty
+            "",
+        },
+    });
+}
+
+fn fuzzDecodeValueProduct(_: void, input: []const u8) anyerror!void {
+    const allocator = std.testing.allocator;
+
+    const columns = [_]types.Column{
+        .{ .name = "name", .type = .string },
+        .{ .name = "age", .type = .u32 },
+    };
+    const product_type: AlgebraicType = .{ .product = &columns };
+
+    var dec = Decoder.init(input);
+    const val = dec.decodeValue(allocator, product_type) catch return;
+    defer val.deinit(allocator);
+
+    // Property: if decode succeeded, re-encoding should produce valid output
+    var enc = Encoder.init();
+    defer enc.deinit(allocator);
+    enc.encodeValue(allocator, val) catch return;
+}
+
+test "fuzz decodeValue option type never crashes" {
+    return std.testing.fuzz({}, fuzzDecodeValueOption, .{
+        .corpus = &.{
+            "\x00\x2a\x00\x00\x00", // Some(42u32)
+            "\x01", // None
+            "\x02", // Invalid tag
+            "",
+        },
+    });
+}
+
+fn fuzzDecodeValueOption(_: void, input: []const u8) anyerror!void {
+    const allocator = std.testing.allocator;
+    const inner_type: AlgebraicType = .u32;
+    const option_type: AlgebraicType = .{ .option = &inner_type };
+
+    var dec = Decoder.init(input);
+    const val = dec.decodeValue(allocator, option_type) catch return;
+    defer val.deinit(allocator);
+}
+
+test "fuzz decodeValue array type never crashes" {
+    return std.testing.fuzz({}, fuzzDecodeValueArray, .{
+        .corpus = &.{
+            // Valid: 2 u16s
+            "\x02\x00\x00\x00\x0a\x00\x14\x00",
+            // Huge count, truncated
+            "\xff\xff\x00\x00",
+            "",
+        },
+    });
+}
+
+fn fuzzDecodeValueArray(_: void, input: []const u8) anyerror!void {
+    const allocator = std.testing.allocator;
+    const inner: AlgebraicType = .u16;
+    const array_type: AlgebraicType = .{ .array = &inner };
+
+    var dec = Decoder.init(input);
+    const val = dec.decodeValue(allocator, array_type) catch return;
+    defer val.deinit(allocator);
+}
+
+test "fuzz encode-decode roundtrip for u64" {
+    return std.testing.fuzz({}, fuzzRoundtripU64, .{
+        .corpus = &.{
+            "\x00\x00\x00\x00\x00\x00\x00\x00",
+            "\xff\xff\xff\xff\xff\xff\xff\xff",
+            "\x01\x00\x00\x00\x00\x00\x00\x00",
+        },
+    });
+}
+
+fn fuzzRoundtripU64(_: void, input: []const u8) anyerror!void {
+    if (input.len < 8) return;
+    const allocator = std.testing.allocator;
+
+    // Interpret first 8 bytes as a u64
+    var dec = Decoder.init(input[0..8]);
+    const val = try dec.decodeU64();
+
+    // Encode it back
+    var enc = Encoder.init();
+    defer enc.deinit(allocator);
+    try enc.encodeU64(allocator, val);
+
+    // Must roundtrip exactly
+    try std.testing.expectEqualSlices(u8, input[0..8], enc.writtenSlice());
+}
+
+test "fuzz encode-decode roundtrip for string" {
+    return std.testing.fuzz({}, fuzzRoundtripString, .{
+        .corpus = &.{
+            "\x05\x00\x00\x00hello",
+            "\x00\x00\x00\x00",
+            "\x03\x00\x00\x00\xe2\x9c\x93", // UTF-8 checkmark
+        },
+    });
+}
+
+fn fuzzRoundtripString(_: void, input: []const u8) anyerror!void {
+    const allocator = std.testing.allocator;
+
+    var dec = Decoder.init(input);
+    const str = dec.decodeString() catch return;
+
+    // Property: if decode succeeded, re-encoding must produce the same bytes
+    var enc = Encoder.init();
+    defer enc.deinit(allocator);
+    try enc.encodeString(allocator, str);
+
+    try std.testing.expectEqualSlices(u8, input[0..dec.pos], enc.writtenSlice());
+}

@@ -952,3 +952,88 @@ test "decompress brotli returns error when disabled" {
     const result = decompress(allocator, &frame);
     try std.testing.expectError(Error.DecompressionFailed, result);
 }
+
+// ============================================================
+// Fuzz Tests
+// ============================================================
+
+test "fuzz ServerMessage.decode never crashes on arbitrary input" {
+    return std.testing.fuzz({}, fuzzServerMessageDecode, .{
+        .corpus = &.{
+            // Empty
+            "",
+            // Just a tag byte
+            "\x00",
+            // InitialConnection tag with truncated identity
+            "\x00\xaa\xaa\xaa",
+            // Unknown tag
+            "\xff",
+            // SubscribeApplied tag (1) with truncated data
+            "\x01\x00\x00\x00\x00",
+            // TransactionUpdate tag (4)
+            "\x04\x00\x00\x00\x00",
+            // ReducerResult tag (6)
+            "\x06",
+            // ProcedureResult tag (7)
+            "\x07",
+        },
+    });
+}
+
+fn fuzzServerMessageDecode(_: void, input: []const u8) anyerror!void {
+    const allocator = std.testing.allocator;
+    // Property: decode must never crash. It should return a valid message or an error.
+    _ = ServerMessage.decode(allocator, input) catch return;
+}
+
+test "fuzz decompress never crashes on arbitrary input" {
+    return std.testing.fuzz({}, fuzzDecompress, .{
+        .corpus = &.{
+            // No compression + valid-ish payload
+            "\x00\x00",
+            // Gzip tag + garbage
+            "\x02\x00\x01\x02\x03",
+            // Brotli tag + garbage
+            "\x01\x00\x01\x02\x03",
+            // Unknown compression tag
+            "\x03\x00",
+            // Empty
+            "",
+        },
+    });
+}
+
+fn fuzzDecompress(_: void, input: []const u8) anyerror!void {
+    const allocator = std.testing.allocator;
+    const result = decompress(allocator, input) catch return;
+    result.deinit(allocator);
+}
+
+test "fuzz ClientMessage encode never crashes" {
+    return std.testing.fuzz({}, fuzzClientMessageEncode, .{
+        .corpus = &.{
+            "\x00\x05hello",
+            "\x01",
+            "",
+        },
+    });
+}
+
+fn fuzzClientMessageEncode(_: void, input: []const u8) anyerror!void {
+    const allocator = std.testing.allocator;
+
+    // Use the fuzz input as a reducer name and args
+    const msg: ClientMessage = .{ .call_reducer = .{
+        .request_id = 1,
+        .reducer = input,
+        .args = input,
+    } };
+
+    const encoded = msg.encode(allocator) catch return;
+    defer allocator.free(encoded);
+
+    // Property: if encode succeeds, we should be able to read back the tag
+    if (encoded.len > 0) {
+        try std.testing.expectEqual(@as(u8, 3), encoded[0]); // CallReducer tag
+    }
+}
