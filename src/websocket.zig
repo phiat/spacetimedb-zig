@@ -422,7 +422,9 @@ pub const WsTransport = struct {
                 return null;
             },
             .ping => {
-                // Auto-respond with pong (websocket.zig does this if no handler)
+                // Must respond with pong to keep connection alive.
+                // The low-level read() API does not auto-respond.
+                self.client.writePong(@constCast(message.data)) catch {};
                 return null;
             },
             .close => {
