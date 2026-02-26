@@ -260,6 +260,14 @@ just fmt               # Format source
 
 See `justfile` for all available commands.
 
+Issue tracking uses [beads](https://github.com/cosmikwolf/beads) — a git-backed tracker with dependency management:
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd list --status=open # All open issues
+```
+
 ## License
 
 MIT
