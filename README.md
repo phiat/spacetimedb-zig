@@ -216,19 +216,19 @@ Server sends (with 1-byte compression envelope): `InitialConnection`, `Subscribe
 
 ```
 ┌─────────────────────────────────────────┐
-│  client.zig — SpacetimeClient           │
-│  (connect, subscribe, call, query)      │
-├────────────┬────────────┬───────────────┤
-│ websocket  │ client     │ http_client   │
-│ .zig       │ _cache.zig │ .zig          │
-├────────────┴──────┬─────┴───────────────┤
-│ table.zig         │ codegen.zig         │
-├───────────────────┴─────────────────────┤
-│ protocol.zig  │ schema.zig              │
-├───────────────┴─────────────────────────┤
-│ row_decoder.zig │ value_encoder.zig     │
-├─────────────────┴───────────────────────┤
-│         bsatn.zig  │  types.zig         │
+│       client.zig — SpacetimeClient      │
+│     (connect, subscribe, call, query)   │
+├─────────────┬─────────────┬─────────────┤
+│ websocket   │ client      │ http_client │
+│ .zig        │ _cache.zig  │ .zig        │
+├─────────────┴──────┬──────┴─────────────┤
+│ table.zig          │ codegen.zig        │
+├────────────────────┴────────────────────┤
+│ protocol.zig       │ schema.zig         │
+├────────────────────┴────────────────────┤
+│ row_decoder.zig    │ value_encoder.zig  │
+├────────────────────┴────────────────────┤
+│ bsatn.zig          │ types.zig          │
 └─────────────────────────────────────────┘
 ```
 
@@ -259,14 +259,6 @@ just fmt               # Format source
 ```
 
 See `justfile` for all available commands.
-
-Issue tracking uses [beads](https://github.com/cosmikwolf/beads) — a git-backed tracker with dependency management:
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd list --status=open # All open issues
-```
 
 ## License
 
