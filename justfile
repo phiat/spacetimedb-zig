@@ -11,6 +11,10 @@ build:
 build-release:
     zig build -Doptimize=ReleaseSafe
 
+# Build with brotli decompression support
+build-brotli:
+    zig build -Denable-brotli=true
+
 # Run all tests
 test:
     zig build test
@@ -26,6 +30,10 @@ integration-test:
 # Type-check without full codegen (fast feedback)
 check:
     zig build check
+
+# Run codegen from SpacetimeDB schema
+codegen *ARGS:
+    zig build codegen -- {{ARGS}}
 
 # Clean build artifacts
 clean:
