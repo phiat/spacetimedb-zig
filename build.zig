@@ -96,6 +96,21 @@ pub fn build(b: *std.Build) void {
     const codegen_step = b.step("codegen", "Generate Zig source from SpacetimeDB schema");
     codegen_step.dependOn(&run_codegen.step);
 
+    // Codegen CLI tests
+    const codegen_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/codegen_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "spacetimedb", .module = lib_mod },
+            .{ .name = "websocket", .module = websocket_mod },
+            .{ .name = "build_options", .module = build_options_mod },
+        },
+    });
+    const codegen_tests = b.addTest(.{ .root_module = codegen_test_mod });
+    const run_codegen_tests = b.addRunArtifact(codegen_tests);
+    test_step.dependOn(&run_codegen_tests.step);
+
     // Check step (fast type-checking)
     const check_mod = mkRootMod(b, b.path("src/root.zig"), target, optimize, websocket_mod, build_options_mod, enable_brotli);
     const check = b.addLibrary(.{

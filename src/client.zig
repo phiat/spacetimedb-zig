@@ -58,6 +58,7 @@ pub const EventHandler = struct {
         onUnsubscribeApplied: ?*const fn (ptr: *anyopaque, query_set_id: u32, rows: ?[]const protocol.TableRows) void = null,
         onQueryResult: ?*const fn (ptr: *anyopaque, request_id: u32, result: protocol.OneOffResult) void = null,
         onTransaction: ?*const fn (ptr: *anyopaque, changes: []const RowChange) bool = null,
+        onProcedureResult: ?*const fn (ptr: *anyopaque, request_id: u32, status: protocol.ProcedureStatus) void = null,
         onError: ?*const fn (ptr: *anyopaque, message: []const u8) void = null,
     };
 
@@ -102,6 +103,10 @@ pub const EventHandler = struct {
     pub fn onTransaction(self: EventHandler, changes: []const RowChange) bool {
         if (self.vtable.onTransaction) |f| return f(self.ptr, changes);
         return false;
+    }
+
+    pub fn onProcedureResult(self: EventHandler, request_id: u32, status: protocol.ProcedureStatus) void {
+        if (self.vtable.onProcedureResult) |f| f(self.ptr, request_id, status);
     }
 
     pub fn onError(self: EventHandler, message: []const u8) void {
@@ -476,7 +481,9 @@ pub const SpacetimeClient = struct {
                 _ = self.active_subscriptions.remove(ua.query_set_id);
                 self.handler.onUnsubscribeApplied(ua.query_set_id, ua.rows);
             },
-            .procedure_result => {},
+            .procedure_result => |pr| {
+                self.handler.onProcedureResult(pr.request_id, pr.status);
+            },
         }
     }
 
@@ -600,6 +607,7 @@ test "EventHandler noop" {
     handler.onUnsubscribeApplied(1, null);
     handler.onQueryResult(1, .{ .err = "test" });
     handler.onError("test error");
+    handler.onProcedureResult(1, .{ .returned = "data" });
 }
 
 test "EventHandler onUnsubscribeApplied callback fires" {
@@ -895,6 +903,32 @@ test "runThreaded exits on null receive (clean close)" {
 
     try std.testing.expect(Tracker.instance.disconnected);
     try std.testing.expect(client.connection.state == .disconnected);
+}
+
+test "EventHandler onProcedureResult callback fires" {
+    const Tracker = struct {
+        request_id: u32 = 0,
+        got_returned: bool = false,
+        var instance: @This() = .{};
+
+        fn onProcResult(ptr: *anyopaque, req_id: u32, status: protocol.ProcedureStatus) void {
+            _ = ptr;
+            instance.request_id = req_id;
+            instance.got_returned = (status == .returned);
+        }
+    };
+    Tracker.instance = .{};
+
+    const handler = EventHandler{
+        .ptr = @ptrCast(&Tracker.instance),
+        .vtable = &.{
+            .onProcedureResult = &Tracker.onProcResult,
+        },
+    };
+
+    handler.onProcedureResult(42, .{ .returned = "result-data" });
+    try std.testing.expectEqual(@as(u32, 42), Tracker.instance.request_id);
+    try std.testing.expect(Tracker.instance.got_returned);
 }
 
 test "onTransaction callback fires before per-row callbacks" {

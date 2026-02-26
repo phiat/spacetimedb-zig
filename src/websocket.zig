@@ -312,6 +312,7 @@ pub const SendError = error{NotConnected} || std.mem.Allocator.Error;
 pub const WsTransport = struct {
     allocator: std.mem.Allocator,
     client: ws.Client,
+    is_closed: bool = false,
 
     pub const ConnectError = error{
         ConnectionFailed,
@@ -408,7 +409,10 @@ pub const WsTransport = struct {
     fn receiveImpl(self: *WsTransport) !?[]u8 {
         const message = self.client.read() catch |err| switch (err) {
             error.WouldBlock => return null, // timeout — no data available
-            else => return err,
+            else => {
+                self.is_closed = true;
+                return err;
+            },
         } orelse return null;
         defer self.client.done(message);
 
@@ -428,6 +432,7 @@ pub const WsTransport = struct {
                 return null;
             },
             .close => {
+                self.is_closed = true;
                 return null;
             },
             .pong => return null,
@@ -435,14 +440,12 @@ pub const WsTransport = struct {
     }
 
     fn closeImpl(self: *WsTransport) void {
+        self.is_closed = true;
         self.client.close(.{}) catch {};
     }
 
     fn isOpenImpl(self: *WsTransport) bool {
-        _ = self;
-        // websocket.zig doesn't expose a simple isOpen check;
-        // we rely on send/receive errors to detect closure.
-        return true;
+        return !self.is_closed;
     }
 };
 

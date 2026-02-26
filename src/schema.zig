@@ -700,6 +700,149 @@ test "parse all primitive types" {
     }
 }
 
+test "parse empty schema" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json =
+        \\{"typespace": {"types": []}, "tables": [], "reducers": []}
+    ;
+
+    const s = try parse(allocator, json);
+    try std.testing.expectEqual(@as(usize, 0), s.tables.len);
+    try std.testing.expectEqual(@as(usize, 0), s.reducers.len);
+    try std.testing.expectEqual(@as(usize, 0), s.typespace.len);
+}
+
+test "parse invalid JSON returns error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const result = parse(arena.allocator(), "not json at all{{{");
+    try std.testing.expectError(SchemaError.InvalidJson, result);
+}
+
+test "parse missing typespace still works" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json =
+        \\{"tables": [], "reducers": []}
+    ;
+
+    const s = try parse(allocator, json);
+    try std.testing.expectEqual(@as(usize, 0), s.typespace.len);
+}
+
+test "parse option type (some/none sum)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json =
+        \\{
+        \\  "typespace": {
+        \\    "types": [
+        \\      {
+        \\        "Product": {
+        \\          "elements": [
+        \\            {"name": {"some": "email"}, "algebraic_type": {
+        \\              "Sum": {
+        \\                "variants": [
+        \\                  {"name": {"some": "some"}, "algebraic_type": {"String": []}},
+        \\                  {"name": {"some": "none"}, "algebraic_type": {"Product": {"elements": []}}}
+        \\                ]
+        \\              }
+        \\            }}
+        \\          ]
+        \\        }
+        \\      }
+        \\    ]
+        \\  },
+        \\  "tables": [{"name": "t", "product_type_ref": 0, "primary_key": [0]}],
+        \\  "reducers": []
+        \\}
+    ;
+
+    const s = try parse(allocator, json);
+    const cols = s.columnsFor("t") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), cols.len);
+    // Should be parsed as option type, not raw sum
+    switch (cols[0].type) {
+        .option => |inner| try std.testing.expect(inner.* == .string),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parse array type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json =
+        \\{
+        \\  "typespace": {
+        \\    "types": [
+        \\      {
+        \\        "Product": {
+        \\          "elements": [
+        \\            {"name": {"some": "tags"}, "algebraic_type": {"Array": {"String": []}}}
+        \\          ]
+        \\        }
+        \\      }
+        \\    ]
+        \\  },
+        \\  "tables": [{"name": "t", "product_type_ref": 0, "primary_key": []}],
+        \\  "reducers": []
+        \\}
+    ;
+
+    const s = try parse(allocator, json);
+    const cols = s.columnsFor("t") orelse return error.TestUnexpectedResult;
+    switch (cols[0].type) {
+        .array => |inner| try std.testing.expect(inner.* == .string),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "invalid ref index returns error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json =
+        \\{
+        \\  "typespace": {
+        \\    "types": [
+        \\      {
+        \\        "Product": {
+        \\          "elements": [
+        \\            {"name": {"some": "x"}, "algebraic_type": {"Ref": 999}}
+        \\          ]
+        \\        }
+        \\      }
+        \\    ]
+        \\  },
+        \\  "tables": [],
+        \\  "reducers": []
+        \\}
+    ;
+
+    const result = parse(allocator, json);
+    try std.testing.expectError(SchemaError.InvalidTypeRef, result);
+}
+
+test "getTable and getReducer return null for unknown names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const s = try parse(arena.allocator(), raw_schema);
+    try std.testing.expect(s.getTable("nonexistent") == null);
+    try std.testing.expect(s.getReducer("nonexistent") == null);
+}
+
 test "schema deinit frees all allocations" {
     const allocator = std.testing.allocator;
 

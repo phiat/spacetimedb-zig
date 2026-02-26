@@ -95,6 +95,64 @@ pub fn main() !void {
     }
 }
 
+// ============================================================
+// Tests
+// ============================================================
+
+test "codegen from JSON schema via stdin path" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const json =
+        \\{
+        \\  "typespace": {
+        \\    "types": [
+        \\      {
+        \\        "Product": {
+        \\          "elements": [
+        \\            {"name": {"some": "id"}, "algebraic_type": {"U64": []}},
+        \\            {"name": {"some": "name"}, "algebraic_type": {"String": []}}
+        \\          ]
+        \\        }
+        \\      }
+        \\    ]
+        \\  },
+        \\  "tables": [{"name": "users", "product_type_ref": 0, "primary_key": [0]}],
+        \\  "reducers": [
+        \\    {"name": "create_user", "params": {"elements": [
+        \\      {"name": {"some": "name"}, "algebraic_type": {"String": []}}
+        \\    ]}}
+        \\  ]
+        \\}
+    ;
+
+    const s = try schema_mod.parse(arena_alloc, json);
+    const source = try codegen.generate(arena_alloc, s);
+
+    // Verify generated source contains expected elements
+    try std.testing.expect(std.mem.indexOf(u8, source, "Users") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "create_user") != null);
+}
+
+test "codegen from empty schema produces valid output" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const json =
+        \\{"typespace": {"types": []}, "tables": [], "reducers": []}
+    ;
+
+    const s = try schema_mod.parse(arena_alloc, json);
+    const source = try codegen.generate(arena_alloc, s);
+
+    // Should produce something (at least a header/import)
+    try std.testing.expect(source.len > 0);
+}
+
 fn printUsage() void {
     stderr_file.writeAll(
         \\Usage: codegen [options]
