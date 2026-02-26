@@ -22,6 +22,15 @@ Connects to [SpacetimeDB](https://spacetimedb.com) via the v2 BSATN binary WebSo
 | `codegen.zig` | Code generation from schema |
 | `codegen_cli.zig` | CLI entry point (`zig build codegen`) |
 
+## Dependencies
+
+| Dependency | Type | Purpose |
+|------------|------|---------|
+| [websocket.zig](https://github.com/karlseguin/websocket.zig) | Zig package (required) | WebSocket client transport |
+| [libbrotlidec](https://github.com/google/brotli) | System library (optional) | Brotli decompression, enabled with `-Denable-brotli=true` |
+
+Everything else uses the Zig standard library: `std.http.Client` for HTTP REST, `std.compress.flate` for gzip, `std.json` for schema parsing.
+
 ## Installation
 
 Add to your `build.zig.zon` dependencies:
