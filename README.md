@@ -258,7 +258,7 @@ just check             # Type-check only
 just fmt               # Format source
 ```
 
-See `justfile` for all available commands.
+See [`justfile`](https://github.com/casey/just) for all available commands.
 
 ## License
 
