@@ -130,43 +130,31 @@ test "property: i64 encode/decode roundtrip" {
 }
 
 test "property: u128 encode/decode roundtrip" {
-    // gen.int(u128) hits an overflow bug in zigcheck's size scaling.
-    // Use intRange with the full u64 range composed into u128 instead.
-    try zigcheck.forAllZip(
-        .{ gen.int(u64), gen.int(u64) },
-        struct {
-            fn prop(lo: u64, hi: u64) !void {
-                const alloc = std.testing.allocator;
-                const n: u128 = (@as(u128, hi) << 64) | @as(u128, lo);
-                var enc = Encoder.init();
-                defer enc.deinit(alloc);
-                try enc.encodeU128(alloc, n);
-                var dec = Decoder.init(enc.writtenSlice());
-                const decoded = try dec.decodeU128();
-                if (decoded != n) return error.PropertyFalsified;
-            }
-        }.prop,
-    );
+    try zigcheck.forAll(u128, gen.int(u128), struct {
+        fn prop(n: u128) !void {
+            const alloc = std.testing.allocator;
+            var enc = Encoder.init();
+            defer enc.deinit(alloc);
+            try enc.encodeU128(alloc, n);
+            var dec = Decoder.init(enc.writtenSlice());
+            const decoded = try dec.decodeU128();
+            if (decoded != n) return error.PropertyFalsified;
+        }
+    }.prop);
 }
 
 test "property: i128 encode/decode roundtrip" {
-    // Same workaround: compose from two u64 halves and bitcast.
-    try zigcheck.forAllZip(
-        .{ gen.int(u64), gen.int(u64) },
-        struct {
-            fn prop(lo: u64, hi: u64) !void {
-                const alloc = std.testing.allocator;
-                const bits: u128 = (@as(u128, hi) << 64) | @as(u128, lo);
-                const n: i128 = @bitCast(bits);
-                var enc = Encoder.init();
-                defer enc.deinit(alloc);
-                try enc.encodeI128(alloc, n);
-                var dec = Decoder.init(enc.writtenSlice());
-                const decoded = try dec.decodeI128();
-                if (decoded != n) return error.PropertyFalsified;
-            }
-        }.prop,
-    );
+    try zigcheck.forAll(i128, gen.int(i128), struct {
+        fn prop(n: i128) !void {
+            const alloc = std.testing.allocator;
+            var enc = Encoder.init();
+            defer enc.deinit(alloc);
+            try enc.encodeI128(alloc, n);
+            var dec = Decoder.init(enc.writtenSlice());
+            const decoded = try dec.decodeI128();
+            if (decoded != n) return error.PropertyFalsified;
+        }
+    }.prop);
 }
 
 test "property: f32 encode/decode roundtrip" {

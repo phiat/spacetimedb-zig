@@ -9,8 +9,8 @@
             .hash = "websocket-0.1.0-ZPISdRlzAwBB_Bz2UMMqxYqF6YEVTIBoFsbzwPUJTHIc",
         },
         .zigcheck = .{
-            .url = "https://github.com/phiat/zigcheck/archive/refs/tags/v0.5.0.tar.gz",
-            .hash = "zigcheck-0.5.0-fuVitxK_AwDbtwn3hynAZSoI_E0evMvpUDrEHNTK7dnT",
+            .url = "https://github.com/phiat/zigcheck/archive/refs/tags/v0.5.1.tar.gz",
+            .hash = "zigcheck-0.5.1-fuVit9HDAwCO6zm0PgZT_WOa8COsbYVwnDjS1ej1nqsE",
         },
     },
     .paths = .{
