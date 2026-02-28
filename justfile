@@ -23,6 +23,10 @@ test:
 test-verbose:
     zig build test -- --verbose
 
+# Run property-based tests (zigcheck)
+prop-test:
+    zig build prop-test
+
 # Run integration tests (requires live SpacetimeDB at localhost:3000)
 integration-test:
     zig build integration-test
