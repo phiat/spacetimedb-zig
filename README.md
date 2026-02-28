@@ -39,7 +39,7 @@ Add to your `build.zig.zon` dependencies:
 
 ```zig
 .spacetimedb_zig = .{
-    .url = "https://github.com/phiat/spacetimedb-zig/archive/refs/heads/main.tar.gz",
+    .url = "https://github.com/phiat/spacetimedb-zig/archive/refs/tags/v0.1.0.tar.gz",
     // Run `zig build` once; the compiler will provide the correct .hash value
 },
 ```
