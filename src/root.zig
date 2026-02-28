@@ -29,4 +29,5 @@ test {
     _ = websocket;
     _ = http_client;
     _ = client;
+    _ = @import("property_tests.zig");
 }

@@ -2,6 +2,7 @@
 
 [![Zig](https://img.shields.io/badge/zig-0.15.2-orange)](https://ziglang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![zigcheck](https://img.shields.io/badge/tested_with-zigcheck-blue)](https://github.com/phiat/zigcheck)
 
 SpacetimeDB client library for Zig.
 
@@ -27,6 +28,7 @@ Connects to [SpacetimeDB](https://spacetimedb.com) via the v2 BSATN binary WebSo
 | Dependency | Type | Purpose |
 |------------|------|---------|
 | [websocket.zig](https://github.com/karlseguin/websocket.zig) | Zig package (required) | WebSocket client transport |
+| [zigcheck](https://github.com/phiat/zigcheck) | Zig package (test-only) | Property-based testing for BSATN codec and typed table roundtrips |
 | [libbrotlidec](https://github.com/google/brotli) | System library (optional) | Brotli decompression, enabled with `-Denable-brotli=true` |
 
 Everything else uses the Zig standard library: `std.http.Client` for HTTP REST, `std.compress.flate` for gzip, `std.json` for schema parsing.

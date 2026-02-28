@@ -11,6 +11,10 @@ pub fn build(b: *std.Build) void {
     });
     const websocket_mod = websocket_dep.module("websocket");
 
+    // Test-only dependency: zigcheck (property-based testing)
+    const zigcheck_dep = b.dependency("zigcheck", .{});
+    const zigcheck_mod = zigcheck_dep.module("zigcheck");
+
     // Optional brotli decompression support (requires libbrotlidec)
     const enable_brotli = b.option(bool, "enable-brotli", "Enable brotli decompression (requires libbrotlidec)") orelse false;
 
@@ -58,6 +62,7 @@ pub fn build(b: *std.Build) void {
 
     // Tests
     const test_mod = mkRootMod(b, b.path("src/root.zig"), target, optimize, websocket_mod, build_options_mod, enable_brotli);
+    test_mod.addImport("zigcheck", zigcheck_mod);
     const lib_tests = b.addTest(.{ .root_module = test_mod });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
@@ -66,6 +71,7 @@ pub fn build(b: *std.Build) void {
 
     // Integration tests (require live SpacetimeDB at localhost:3000)
     const int_mod = mkRootMod(b, b.path("src/integration_test.zig"), target, optimize, websocket_mod, build_options_mod, enable_brotli);
+    int_mod.addImport("zigcheck", zigcheck_mod);
     const integration_tests = b.addTest(.{ .root_module = int_mod });
     const run_integration_tests = b.addRunArtifact(integration_tests);
 
@@ -110,6 +116,14 @@ pub fn build(b: *std.Build) void {
     const codegen_tests = b.addTest(.{ .root_module = codegen_test_mod });
     const run_codegen_tests = b.addRunArtifact(codegen_tests);
     test_step.dependOn(&run_codegen_tests.step);
+
+    // Property tests (zigcheck — can be run independently)
+    const prop_mod = mkRootMod(b, b.path("src/property_tests.zig"), target, optimize, websocket_mod, build_options_mod, enable_brotli);
+    prop_mod.addImport("zigcheck", zigcheck_mod);
+    const prop_tests = b.addTest(.{ .root_module = prop_mod });
+    const run_prop_tests = b.addRunArtifact(prop_tests);
+    const prop_step = b.step("prop-test", "Run property-based tests (zigcheck)");
+    prop_step.dependOn(&run_prop_tests.step);
 
     // Check step (fast type-checking)
     const check_mod = mkRootMod(b, b.path("src/root.zig"), target, optimize, websocket_mod, build_options_mod, enable_brotli);

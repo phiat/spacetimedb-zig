@@ -8,6 +8,10 @@
             .url = "https://github.com/karlseguin/websocket.zig/archive/97fefafa59cc78ce177cff540b8685cd7f699276.tar.gz",
             .hash = "websocket-0.1.0-ZPISdRlzAwBB_Bz2UMMqxYqF6YEVTIBoFsbzwPUJTHIc",
         },
+        .zigcheck = .{
+            .url = "https://github.com/phiat/zigcheck/archive/refs/tags/v0.5.0.tar.gz",
+            .hash = "zigcheck-0.5.0-fuVitxK_AwDbtwn3hynAZSoI_E0evMvpUDrEHNTK7dnT",
+        },
     },
     .paths = .{
         "build.zig",
