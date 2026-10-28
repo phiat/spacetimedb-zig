@@ -4,63 +4,27 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![zigcheck](https://img.shields.io/badge/tested_with-zigcheck-blue)](https://github.com/phiat/zigcheck)
 
-SpacetimeDB client library for Zig.
+[SpacetimeDB](https://spacetimedb.com) client library for Zig 0.17.0. It speaks the v2 BSATN WebSocket protocol and gives you real-time subscriptions, reducer calls, a local cache of subscribed tables, an HTTP client, and code generation. Tested against SpacetimeDB 2.13.0.
 
-Connects to [SpacetimeDB](https://spacetimedb.com) via the v2 BSATN binary WebSocket protocol, providing real-time subscriptions, reducer calls, a local in-memory client cache, an HTTP REST client, and code generation.
-
-## Features
-
-| Module | Description |
-|--------|-------------|
-| `bsatn.zig` | Binary codec — encoder, decoder |
-| `protocol.zig` | v2 client/server message encoding and decoding |
-| `websocket.zig` | WebSocket connection state machine |
-| `schema.zig` | Schema fetcher and parser (tables, reducers, typespace) |
-| `client_cache.zig` | In-memory local mirror of subscribed tables |
-| `client.zig` | High-level client with callbacks and event dispatch |
-| `http_client.zig` | HTTP REST client for all v1 API endpoints |
-| `table.zig` | Comptime typed table access (BSATN ↔ Zig structs) |
-| `codegen.zig` | Code generation from schema |
-| `codegen_cli.zig` | CLI entry point (`zig build codegen`) |
-
-## Dependencies
-
-| Dependency | Type | Purpose |
-|------------|------|---------|
-| [websocket.zig](https://github.com/karlseguin/websocket.zig) | Zig package (required) | WebSocket client transport |
-| [zigcheck](https://github.com/phiat/zigcheck) | Zig package (test-only) | Property-based testing for BSATN codec and typed table roundtrips |
-| [libbrotlidec](https://github.com/google/brotli) | System library (optional) | Brotli decompression, enabled with `-Denable-brotli=true` |
-
-Everything else uses the Zig standard library: `std.http.Client` for HTTP REST, `std.compress.flate` for gzip, `std.json` for schema parsing.
-
-## Installation
-
-Add to your `build.zig.zon` dependencies:
+## Install
 
 ```zig
+// build.zig.zon
 .spacetimedb_zig = .{
-    .url = "https://github.com/phiat/spacetimedb-zig/archive/refs/tags/v0.1.0.tar.gz",
-    // Run `zig build` once; the compiler will provide the correct .hash value
+    .url = "https://github.com/phiat/spacetimedb-zig/archive/refs/tags/v0.2.0.tar.gz",
+    // run `zig build` once; the compiler prints the .hash to add
 },
 ```
 
-Then in `build.zig`:
-
 ```zig
-const spacetimedb = b.dependency("spacetimedb_zig", .{
-    .target = target,
-    .optimize = optimize,
-});
+// build.zig
+const spacetimedb = b.dependency("spacetimedb_zig", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("spacetimedb", spacetimedb.module("spacetimedb"));
 ```
 
-[GitHub](https://github.com/phiat/spacetimedb-zig)
+It depends on [websocket.zig](https://github.com/karlseguin/websocket.zig). Gzip uses `std.compress.flate`; brotli is optional (`-Denable-brotli=true`, needs `libbrotlidec`). [zigcheck](https://github.com/phiat/zigcheck) is used for tests only.
 
-## Quick Start
-
-### High-Level Client (recommended)
-
-Create a client with event callbacks:
+## Quick start
 
 ```zig
 const stdb = @import("spacetimedb");
@@ -71,201 +35,122 @@ const handler = stdb.client.EventHandler{
         .onConnect = myOnConnect,
         .onInsert = myOnInsert,
         .onDelete = myOnDelete,
-        .onUpdate = myOnUpdate,
-        .onTransaction = myOnTransaction,
-        .onReducerResult = myOnReducerResult,
     },
 };
 
 var client = stdb.client.SpacetimeClient.init(allocator, .{
     .host = "localhost:3000",
     .database = "my_db",
-    .token = "my-jwt-token",
+    .token = "my-jwt-token", // optional
     .subscriptions = &.{"SELECT * FROM users"},
 }, handler);
 defer client.deinit();
-```
 
-Connect and interact:
-
-```zig
-// Connect via WebSocket transport
-client.connect(transport);
-
-// ...or open a real WebSocket connection (io: std.Io, e.g. `init.io` from `pub fn main(init: std.process.Init)`)
+// Network access goes through std.Io, e.g. `init.io` from `pub fn main(init: std.process.Init)`.
 try client.connectReal(io);
 
-// Subscribe to tables
+// Process incoming frames: poll from your own loop...
+while (running) _ = try client.frameTick();
+// ...or run a background receive thread.
+const thread = try client.runThreaded();
+
 const qs_id = try client.subscribe(&.{"SELECT * FROM users"});
-
-// Call a reducer (BSATN-encoded args)
 const req_id = try client.callReducerRaw("create_user", bsatn_args);
-
-// Query the local cache (untyped)
-const row_count = client.count("users");
-const rows = try client.getAll("users");
-
-// Query the local cache (typed via comptime)
-const users = try client.getTyped(User, "users");
-defer allocator.free(users);
-
-// Unsubscribe from a query set
 try client.unsubscribe(qs_id);
+
+// Local cache
+const n = client.count("users");
+const rows = try client.getAll("users"); // untyped
+const users = try client.getTyped(User, "users"); // typed
+defer allocator.free(users);
 ```
 
-### Client Callbacks
+`client.connect(transport)` takes any `websocket.Transport` instead, which is how the tests use a mock.
 
-All callbacks are optional:
+### Callbacks
+
+All fields of `EventHandler.VTable` are optional.
 
 | Callback | When it fires |
 |----------|---------------|
-| `onConnect(identity, conn_id, token)` | Initial connection established |
-| `onSubscribeApplied(table_name, row_count)` | Subscription data arrives |
-| `onUnsubscribeApplied(query_set_id, rows)` | Unsubscription confirmed (rows optionally returned) |
-| `onInsert(table_name, row)` | Row inserted |
-| `onDelete(table_name, row)` | Row deleted |
-| `onUpdate(table_name, old_row, new_row)` | Row replaced (same PK deleted + inserted) |
-| `onTransaction(changes)` | Full transaction — return `true` to suppress per-row callbacks |
-| `onReducerResult(request_id, result)` | Reducer completes |
-| `onQueryResult(request_id, result)` | One-off SQL query completes |
-| `onProcedureResult(request_id, status)` | Procedure call completes |
-| `onError(message)` | Protocol or transport error |
+| `onConnect(identity, conn_id, token)` | Connection established |
 | `onDisconnect(reason)` | Disconnected |
+| `onSubscribeApplied(table_name, row_count)` | Subscription data arrives |
+| `onUnsubscribeApplied(query_set_id, rows)` | Unsubscription confirmed |
+| `onInsert` / `onDelete(table_name, row)` | Row inserted / deleted |
+| `onUpdate(table_name, old_row, new_row)` | Same primary key deleted and inserted |
+| `onTransaction(changes)` | Whole transaction; return `true` to suppress per-row callbacks |
+| `onReducerResult(request_id, result)` | Reducer finished |
+| `onQueryResult(request_id, result)` | One-off SQL query finished |
+| `onProcedureResult(request_id, status)` | Procedure finished |
+| `onError(message)` | Protocol or transport error |
 
-### Typed Table Access
+## Typed rows
 
-The `table` module provides comptime-powered direct BSATN-to-struct decoding, bypassing the intermediate `AlgebraicValue` layer:
+`table` decodes BSATN straight into your structs at comptime:
 
 ```zig
-const stdb = @import("spacetimedb");
+const User = struct { id: u64, name: []const u8, email: ?[]const u8 };
 
-const User = struct {
-    id: u64,
-    name: []const u8,
-    email: ?[]const u8,
-};
-
-// Decode a single row from BSATN bytes (allocates — caller must free)
 var user = try stdb.table.decodeRow(User, allocator, bsatn_bytes);
 defer stdb.table.freeTypedRow(User, allocator, &user);
 
-// Encode back to BSATN
 const bytes = try stdb.table.encodeRow(User, allocator, user);
 defer allocator.free(bytes);
 ```
 
-### Code Generation
-
-Generate typed structs, reducer functions, and decode/encode methods from a live database:
+## Code generation
 
 ```bash
-# From a live server
 zig build codegen -- --host localhost:3000 --database mydb --output src/generated.zig
-
-# From a JSON schema file
 cat schema.json | zig build codegen -- --stdin --output src/generated.zig
 ```
 
-Produces:
-- `pub const TableName = struct { ... }` with `decode`, `encode`, `free` methods
-- `pub const Reducers = struct { ... }` with typed call functions
+The output has one `pub const TableName = struct { ... }` per table (with `decode`, `encode`, `free`) and a `Reducers` struct with typed call functions.
 
-### HTTP REST Client
+## HTTP client
 
-For operations that don't need a persistent WebSocket (identity management, database admin, ad-hoc SQL):
+For identity management, database admin, SQL and reducer calls without a WebSocket:
 
 ```zig
-const stdb = @import("spacetimedb");
-
 var http_transport = stdb.http_client.StdHttpTransport{ .io = io };
-var client = stdb.http_client.Client.init(allocator, .{
+var http = stdb.http_client.Client.init(allocator, .{
     .host = "localhost:3000",
     .database = "my_db",
     .token = "my-jwt",
 }, http_transport.transport());
 
-// Identity
-const identity_json = try client.createIdentity();
-
-// SQL query
-const sql_resp = try client.executeSql("SELECT * FROM users");
-
-// Call a reducer over HTTP
-const resp = try client.callReducer("create_user", args_json);
-
-// Database management
-const db_info = try client.getDatabase("my_db");
-const names = try client.getDatabaseNames("my_db");
+const identity_json = try http.createIdentity();
+const sql = try http.executeSql("SELECT * FROM users");
+const resp = try http.callReducer("create_user", args_json);
+const info = try http.getDatabase("my_db");
 ```
 
-Network, file and clock access goes through `std.Io`, so the pieces that touch them take an `io`: `StdHttpTransport{ .io = io }`, `client.connectReal(io)`, `saveCredentials(io, ...)` / `loadCredentials(io, ...)`. `defaultCredsDir(allocator, environ)` takes a `std.process.Environ` (`init.minimal.environ`).
+Credential helpers take the same `io`: `saveCredentials(io, ...)`, `loadCredentials(io, ...)`; `defaultCredsDir(allocator, environ)` takes a `std.process.Environ` (`init.minimal.environ`).
 
-## Architecture
+## Modules
 
-### BSATN Codec
-
-Binary SpacetimeDB Algebraic Type Notation — a compact little-endian binary format:
-
-- Integers: `u8`..`u256`, `i8`..`i256` (little-endian)
-- Floats: `f32`, `f64` (IEEE 754, little-endian)
-- Strings/Bytes: `u32` length prefix + raw data
-- Arrays: `u32` count prefix + concatenated elements
-- Products (structs): fields concatenated in order
-- Sums (enums): `u8` variant tag + payload
-
-### Protocol (v2)
-
-Client sends: `Subscribe`, `Unsubscribe`, `OneOffQuery`, `CallReducer`, `CallProcedure`.
-
-Server sends (with 1-byte compression envelope): `InitialConnection`, `SubscribeApplied`, `UnsubscribeApplied`, `SubscriptionError`, `TransactionUpdate`, `OneOffQueryResult`, `ReducerResult`, `ProcedureResult`.
-
-### Layer Diagram
-
-```
-┌─────────────────────────────────────────┐
-│       client.zig — SpacetimeClient      │
-│     (connect, subscribe, call, query)   │
-├─────────────┬─────────────┬─────────────┤
-│ websocket   │ client      │ http_client │
-│ .zig        │ _cache.zig  │ .zig        │
-├─────────────┴──────┬──────┴─────────────┤
-│ table.zig          │ codegen.zig        │
-├────────────────────┴────────────────────┤
-│ protocol.zig       │ schema.zig         │
-├────────────────────┴────────────────────┤
-│ row_decoder.zig    │ value_encoder.zig  │
-├────────────────────┴────────────────────┤
-│ bsatn.zig          │ types.zig          │
-└─────────────────────────────────────────┘
-```
+| Module | Description |
+|--------|-------------|
+| `client.zig` | `SpacetimeClient`: callbacks, subscriptions, reducers, cache queries |
+| `websocket.zig` | Connection state machine and WebSocket transport |
+| `http_client.zig` | HTTP client (`/v1` API) and credential storage |
+| `client_cache.zig` | In-memory mirror of subscribed tables |
+| `table.zig`, `codegen.zig` | Typed BSATN access; code generation (CLI in `codegen_cli.zig`) |
+| `protocol.zig`, `schema.zig` | v2 message codec; schema fetch and parse |
+| `row_decoder.zig`, `value_encoder.zig` | Schema-driven row decoding and value encoding |
+| `bsatn.zig`, `types.zig` | BSATN codec (little-endian; `u32` length prefixes) and algebraic types |
 
 ## Development
 
 ```bash
-zig build              # Build the library
-zig build test         # Unit tests (no server needed)
-zig build integration-test  # All tests (requires SpacetimeDB on :3000, or set SPACETIMEDB_HOST=host:port)
-zig build check        # Type-check only (fast)
+zig build test              # unit tests, no server needed
+zig build prop-test         # property tests (zigcheck)
+zig build integration-test  # needs SpacetimeDB with the test module published
+zig build check             # type-check only
 ```
 
-With optional brotli decompression:
-
-```bash
-zig build -Denable-brotli=true        # Build with brotli
-zig build test -Denable-brotli=true   # Test with brotli
-```
-
-Or using [just](https://github.com/casey/just):
-
-```bash
-just build             # Build
-just test              # Unit tests
-just integration-test  # Integration tests
-just check             # Type-check only
-just fmt               # Format source
-```
-
-See [`justfile`](https://github.com/casey/just) for all available commands.
+Integration tests expect a server at `localhost:3000` with the `testmodule` database published; set `SPACETIMEDB_HOST=host:port` to use another. Add `-Denable-brotli=true` to build or test with brotli. [`just`](https://github.com/casey/just) recipes for these are in the `justfile`.
 
 ## License
 
