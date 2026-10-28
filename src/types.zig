@@ -61,8 +61,23 @@ pub const AlgebraicType = union(enum) {
     /// Returns true if this is a primitive (non-container, non-composite) type.
     pub fn isPrimitive(self: AlgebraicType) bool {
         return switch (self) {
-            .bool, .u8, .i8, .u16, .i16, .u32, .i32, .u64, .i64,
-            .u128, .i128, .u256, .i256, .f32, .f64, .string, .bytes,
+            .bool,
+            .u8,
+            .i8,
+            .u16,
+            .i16,
+            .u32,
+            .i32,
+            .u64,
+            .i64,
+            .u128,
+            .i128,
+            .u256,
+            .i256,
+            .f32,
+            .f64,
+            .string,
+            .bytes,
             => true,
             .array, .option, .product, .sum, .ref => false,
         };
@@ -131,8 +146,21 @@ pub const AlgebraicValue = union(enum) {
                 allocator.destroy(s.value);
             },
             // Primitives: nothing to free
-            .bool, .u8, .i8, .u16, .i16, .u32, .i32, .u64, .i64,
-            .u128, .i128, .u256, .i256, .f32, .f64,
+            .bool,
+            .u8,
+            .i8,
+            .u16,
+            .i16,
+            .u32,
+            .i32,
+            .u64,
+            .i64,
+            .u128,
+            .i128,
+            .u256,
+            .i256,
+            .f32,
+            .f64,
             => {},
         }
     }

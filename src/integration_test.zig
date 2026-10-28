@@ -44,7 +44,7 @@ fn freeReducerOutcome(allocator: std.mem.Allocator, result: protocol.ReducerOutc
     switch (result) {
         .ok => |ok_result| freeQuerySets(allocator, ok_result.transaction),
         .ok_empty => {},
-        .err => {},     // borrowed from frame buffer
+        .err => {}, // borrowed from frame buffer
         .internal_error => {}, // borrowed from frame buffer
     }
 }
