@@ -107,6 +107,7 @@ pub const HttpTransport = struct {
     pub const VTable = struct {
         get: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, url: []const u8, auth: ?[]const u8) anyerror!Response,
         post: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, auth: ?[]const u8) anyerror!Response,
+        put: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, auth: ?[]const u8) anyerror!Response,
     };
 
     pub fn get(self: HttpTransport, allocator: std.mem.Allocator, url: []const u8, auth: ?[]const u8) !Response {
@@ -115,6 +116,10 @@ pub const HttpTransport = struct {
 
     pub fn post(self: HttpTransport, allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, auth: ?[]const u8) !Response {
         return self.vtable.post(self.ptr, allocator, url, body, auth);
+    }
+
+    pub fn put(self: HttpTransport, allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, auth: ?[]const u8) !Response {
+        return self.vtable.put(self.ptr, allocator, url, body, auth);
     }
 };
 
@@ -236,13 +241,13 @@ pub const Client = struct {
         return self.transport.get(self.allocator, url, null);
     }
 
-    /// Publish a WASM module to a database.
+    /// Publish a WASM module to a database (creates it, or updates it for the same identity).
     pub fn publishDatabase(self: *Client, name_or_identity: []const u8, wasm_binary: []const u8, token: []const u8) !Response {
         const url = try std.fmt.allocPrint(self.allocator, "http://{s}/v1/database/{s}", .{ self.config.host, name_or_identity });
         defer self.allocator.free(url);
         const auth = try buildAuthHeader(self.allocator, token);
         defer self.allocator.free(auth);
-        return self.transport.post(self.allocator, url, wasm_binary, auth);
+        return self.transport.put(self.allocator, url, wasm_binary, auth);
     }
 
     /// List all names for a database.
@@ -311,43 +316,39 @@ pub const Credentials = struct {
 };
 
 /// Save credentials to a file. Format: identity\ntoken
-pub fn saveCredentials(allocator: std.mem.Allocator, dir_path: []const u8, database: []const u8, identity: []const u8, token: []const u8) !void {
+pub fn saveCredentials(io: std.Io, allocator: std.mem.Allocator, dir_path: []const u8, database: []const u8, identity: []const u8, token: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+
     // Ensure directory exists
-    std.fs.cwd().makePath(dir_path) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try cwd.createDirPath(io, dir_path);
 
     const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}.creds", .{ dir_path, database });
     defer allocator.free(file_path);
 
-    const file = try std.fs.cwd().createFile(file_path, .{});
-    defer file.close();
+    const file = try cwd.createFile(io, file_path, .{});
+    defer file.close(io);
 
-    try file.writeAll(identity);
-    try file.writeAll("\n");
-    try file.writeAll(token);
+    try file.writeStreamingAll(io, identity);
+    try file.writeStreamingAll(io, "\n");
+    try file.writeStreamingAll(io, token);
 }
 
 /// Load credentials from a file. Caller owns returned strings.
-pub fn loadCredentials(allocator: std.mem.Allocator, dir_path: []const u8, database: []const u8) !?Credentials {
+pub fn loadCredentials(io: std.Io, allocator: std.mem.Allocator, dir_path: []const u8, database: []const u8) !?Credentials {
     const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}.creds", .{ dir_path, database });
     defer allocator.free(file_path);
 
-    const file = std.fs.cwd().openFile(file_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
+    const content = std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound, error.StreamTooLong => return null,
         else => return err,
     };
-    defer file.close();
-
-    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
     defer allocator.free(content);
 
     // Split on first newline
     if (std.mem.indexOfScalar(u8, content, '\n')) |nl| {
         const identity = try allocator.dupe(u8, content[0..nl]);
         errdefer allocator.free(identity);
-        const token = try allocator.dupe(u8, std.mem.trimRight(u8, content[nl + 1 ..], "\n\r"));
+        const token = try allocator.dupe(u8, std.mem.trimEnd(u8, content[nl + 1 ..], "\n\r"));
         return .{ .identity = identity, .token = token };
     }
     return null;
@@ -363,9 +364,9 @@ pub fn freeCredentials(allocator: std.mem.Allocator, creds: Credentials) void {
 pub const DEFAULT_CREDS_DIR = ".spacetimedb_client_credentials";
 
 /// Get the default credentials directory path. Caller owns returned string.
-pub fn defaultCredsDir(allocator: std.mem.Allocator) ![]const u8 {
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return allocator.dupe(u8, DEFAULT_CREDS_DIR),
+pub fn defaultCredsDir(allocator: std.mem.Allocator, environ: std.process.Environ) ![]const u8 {
+    const home = environ.getAlloc(allocator, "HOME") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return allocator.dupe(u8, DEFAULT_CREDS_DIR),
         else => return err,
     };
     defer allocator.free(home);
@@ -473,39 +474,47 @@ test "Response isSuccess" {
 
 /// Real HTTP transport using Zig's std.http.Client.
 pub const StdHttpTransport = struct {
+    io: std.Io,
+
     pub fn transport(self: *StdHttpTransport) HttpTransport {
         return .{
             .ptr = @ptrCast(self),
             .vtable = &.{
                 .get = @ptrCast(&doGet),
                 .post = @ptrCast(&doPost),
+                .put = @ptrCast(&doPut),
             },
         };
     }
 
-    fn doGet(_: *StdHttpTransport, allocator: std.mem.Allocator, url: []const u8, auth: ?[]const u8) !Response {
-        return doRequest(allocator, url, .GET, null, auth);
+    fn doGet(self: *StdHttpTransport, allocator: std.mem.Allocator, url: []const u8, auth: ?[]const u8) !Response {
+        return doRequest(self.io, allocator, url, .GET, null, auth);
     }
 
-    fn doPost(_: *StdHttpTransport, allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, auth: ?[]const u8) !Response {
-        return doRequest(allocator, url, .POST, body, auth);
+    fn doPost(self: *StdHttpTransport, allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, auth: ?[]const u8) !Response {
+        return doRequest(self.io, allocator, url, .POST, body, auth);
+    }
+
+    fn doPut(self: *StdHttpTransport, allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, auth: ?[]const u8) !Response {
+        return doRequest(self.io, allocator, url, .PUT, body, auth);
     }
 
     fn doRequest(
+        io: std.Io,
         allocator: std.mem.Allocator,
         url_str: []const u8,
         method: std.http.Method,
         body: ?[]const u8,
         auth: ?[]const u8,
     ) !Response {
-        var client: std.http.Client = .{ .allocator = allocator };
+        var client: std.http.Client = .{ .allocator = allocator, .io = io };
         defer client.deinit();
 
         var resp_writer = std.Io.Writer.Allocating.init(allocator);
         defer resp_writer.deinit();
 
-        // Zig 0.15 asserts POST must have a body; use empty string if null
-        const payload: ?[]const u8 = body orelse if (method == .POST) "" else null;
+        // std.http asserts POST and PUT have a body; use empty string if null
+        const payload: ?[]const u8 = body orelse if (method == .POST or method == .PUT) "" else null;
 
         const result = client.fetch(.{
             .location = .{ .url = url_str },
@@ -518,7 +527,7 @@ pub const StdHttpTransport = struct {
             .response_writer = &resp_writer.writer,
         }) catch return HttpError.ConnectionFailed;
 
-        const status: u16 = @intFromEnum(result.status);
+        const status: u16 = @backingInt(result.status);
 
         // Take ownership of the collected body
         var list = resp_writer.toArrayList();
@@ -539,6 +548,8 @@ pub const StdHttpTransport = struct {
 const MockHttpTransport = struct {
     response_status: u16,
     response_body: []const u8,
+    /// Verb of the last request.
+    last_method: []const u8 = "",
 
     fn transport(self: *MockHttpTransport) HttpTransport {
         return .{
@@ -546,11 +557,13 @@ const MockHttpTransport = struct {
             .vtable = &.{
                 .get = @ptrCast(&getFn),
                 .post = @ptrCast(&postFn),
+                .put = @ptrCast(&putFn),
             },
         };
     }
 
     fn getFn(self: *MockHttpTransport, allocator: std.mem.Allocator, _: []const u8, _: ?[]const u8) !Response {
+        self.last_method = "GET";
         return .{
             .status = self.response_status,
             .body = try allocator.dupe(u8, self.response_body),
@@ -558,7 +571,14 @@ const MockHttpTransport = struct {
         };
     }
 
+    fn putFn(self: *MockHttpTransport, allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, auth: ?[]const u8) !Response {
+        const resp = try self.postFn(allocator, url, body, auth);
+        self.last_method = "PUT";
+        return resp;
+    }
+
     fn postFn(self: *MockHttpTransport, allocator: std.mem.Allocator, _: []const u8, _: ?[]const u8, _: ?[]const u8) !Response {
+        self.last_method = "POST";
         return .{
             .status = self.response_status,
             .body = try allocator.dupe(u8, self.response_body),
@@ -620,29 +640,29 @@ test "saveCredentials and loadCredentials round-trip" {
     const tmp_dir = "/tmp/spacetimedb-zig-test-creds";
 
     // Clean up before test
-    std.fs.cwd().deleteTree(tmp_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, tmp_dir) catch {};
 
-    try saveCredentials(allocator, tmp_dir, "my_db", "identity-hex-abc", "jwt-token-xyz");
+    try saveCredentials(std.testing.io, allocator, tmp_dir, "my_db", "identity-hex-abc", "jwt-token-xyz");
 
-    const creds = (try loadCredentials(allocator, tmp_dir, "my_db")).?;
+    const creds = (try loadCredentials(std.testing.io, allocator, tmp_dir, "my_db")).?;
     defer freeCredentials(allocator, creds);
 
     try std.testing.expectEqualStrings("identity-hex-abc", creds.identity);
     try std.testing.expectEqualStrings("jwt-token-xyz", creds.token);
 
     // Clean up
-    std.fs.cwd().deleteTree(tmp_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, tmp_dir) catch {};
 }
 
 test "loadCredentials returns null for missing file" {
     const allocator = std.testing.allocator;
-    const result = try loadCredentials(allocator, "/tmp/nonexistent-dir-12345", "nope");
+    const result = try loadCredentials(std.testing.io, allocator, "/tmp/nonexistent-dir-12345", "nope");
     try std.testing.expect(result == null);
 }
 
 test "defaultCredsDir" {
     const allocator = std.testing.allocator;
-    const dir = try defaultCredsDir(allocator);
+    const dir = try defaultCredsDir(allocator, std.testing.environ);
     defer allocator.free(dir);
     // Should contain the default dir name
     try std.testing.expect(std.mem.endsWith(u8, dir, DEFAULT_CREDS_DIR));
@@ -699,6 +719,8 @@ test "Client publishDatabase" {
     const resp = try client.publishDatabase("my_db", "fake-wasm", "my-token");
     defer resp.deinit();
     try std.testing.expect(resp.isSuccess());
+    // SpacetimeDB v2 rejects POST on this route (405); publishing is PUT.
+    try std.testing.expectEqualStrings("PUT", mock.last_method);
 }
 
 test "Client getDatabaseNames" {

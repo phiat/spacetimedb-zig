@@ -1,6 +1,6 @@
 # spacetimedb-zig
 
-[![Zig](https://img.shields.io/badge/zig-0.15.2-orange)](https://ziglang.org)
+[![Zig](https://img.shields.io/badge/zig-0.17.0-orange)](https://ziglang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![zigcheck](https://img.shields.io/badge/tested_with-zigcheck-blue)](https://github.com/phiat/zigcheck)
 
@@ -92,6 +92,9 @@ Connect and interact:
 // Connect via WebSocket transport
 client.connect(transport);
 
+// ...or open a real WebSocket connection (io: std.Io, e.g. `init.io` from `pub fn main(init: std.process.Init)`)
+try client.connectReal(io);
+
 // Subscribe to tables
 const qs_id = try client.subscribe(&.{"SELECT * FROM users"});
 
@@ -174,7 +177,7 @@ For operations that don't need a persistent WebSocket (identity management, data
 ```zig
 const stdb = @import("spacetimedb");
 
-var http_transport = stdb.http_client.StdHttpTransport{};
+var http_transport = stdb.http_client.StdHttpTransport{ .io = io };
 var client = stdb.http_client.Client.init(allocator, .{
     .host = "localhost:3000",
     .database = "my_db",
@@ -194,6 +197,8 @@ const resp = try client.callReducer("create_user", args_json);
 const db_info = try client.getDatabase("my_db");
 const names = try client.getDatabaseNames("my_db");
 ```
+
+Network, file and clock access goes through `std.Io`, so the pieces that touch them take an `io`: `StdHttpTransport{ .io = io }`, `client.connectReal(io)`, `saveCredentials(io, ...)` / `loadCredentials(io, ...)`. `defaultCredsDir(allocator, environ)` takes a `std.process.Environ` (`init.minimal.environ`).
 
 ## Architecture
 
@@ -239,7 +244,7 @@ Server sends (with 1-byte compression envelope): `InitialConnection`, `Subscribe
 ```bash
 zig build              # Build the library
 zig build test         # Unit tests (no server needed)
-zig build integration-test  # All tests (requires SpacetimeDB on :3000)
+zig build integration-test  # All tests (requires SpacetimeDB on :3000, or set SPACETIMEDB_HOST=host:port)
 zig build check        # Type-check only (fast)
 ```
 

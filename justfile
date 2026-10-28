@@ -27,7 +27,7 @@ test-verbose:
 prop-test:
     zig build prop-test
 
-# Run integration tests (requires live SpacetimeDB at localhost:3000)
+# Run integration tests (requires live SpacetimeDB at localhost:3000, or SPACETIMEDB_HOST=host:port)
 integration-test:
     zig build integration-test
 

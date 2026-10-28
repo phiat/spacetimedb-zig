@@ -10,12 +10,13 @@
 //   OneOffQueryResult(5), ReducerResult(6), ProcedureResult(7)
 
 const std = @import("std");
+const fuzz_input = @import("fuzz_input.zig");
 const flate = std.compress.flate;
 const build_options = @import("build_options");
 const bsatn = @import("bsatn.zig");
 const types = @import("types.zig");
 
-const brotli = if (build_options.enable_brotli) @cImport(@cInclude("brotli/decode.h")) else struct {};
+const brotli = if (build_options.enable_brotli) @import("brotli_c") else struct {};
 
 const Encoder = bsatn.Encoder;
 const Decoder = bsatn.Decoder;
@@ -85,7 +86,7 @@ fn decompressBrotli(allocator: std.mem.Allocator, payload: []const u8) Error!Dec
         return Error.DecompressionFailed;
     defer brotli.BrotliDecoderDestroyInstance(state);
 
-    var output = std.ArrayListUnmanaged(u8){};
+    var output = std.ArrayListUnmanaged(u8).empty;
     errdefer output.deinit(allocator);
 
     var avail_in: usize = payload.len;
@@ -203,7 +204,7 @@ pub const ClientMessage = union(enum) {
                 try enc.encodeU8(allocator, 1); // tag
                 try enc.encodeU32(allocator, msg.request_id);
                 try enc.encodeU32(allocator, msg.query_set_id);
-                try enc.encodeU8(allocator, @intFromEnum(msg.flags));
+                try enc.encodeU8(allocator, @backingInt(msg.flags));
             },
             .one_off_query => |msg| {
                 try enc.encodeU8(allocator, 2); // tag
@@ -980,7 +981,9 @@ test "fuzz ServerMessage.decode never crashes on arbitrary input" {
     });
 }
 
-fn fuzzServerMessageDecode(_: void, input: []const u8) anyerror!void {
+fn fuzzServerMessageDecode(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     const allocator = std.testing.allocator;
     // Property: decode must never crash. It should return a valid message or an error.
     _ = ServerMessage.decode(allocator, input) catch return;
@@ -1003,7 +1006,9 @@ test "fuzz decompress never crashes on arbitrary input" {
     });
 }
 
-fn fuzzDecompress(_: void, input: []const u8) anyerror!void {
+fn fuzzDecompress(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     const allocator = std.testing.allocator;
     const result = decompress(allocator, input) catch return;
     result.deinit(allocator);
@@ -1019,7 +1024,9 @@ test "fuzz ClientMessage encode never crashes" {
     });
 }
 
-fn fuzzClientMessageEncode(_: void, input: []const u8) anyerror!void {
+fn fuzzClientMessageEncode(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     const allocator = std.testing.allocator;
 
     // Use the fuzz input as a reducer name and args

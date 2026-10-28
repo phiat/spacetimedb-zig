@@ -1,6 +1,6 @@
 // Integration Tests Against Live SpacetimeDB
 //
-// Requires a running SpacetimeDB at localhost:3000 with testmodule published.
+// Requires a running SpacetimeDB (localhost:3000, or SPACETIMEDB_HOST) with testmodule published.
 // testmodule has: Person table (id u64, name string, age u32),
 // reducers: add_person(name string, age u32), say_hello().
 //
@@ -15,14 +15,17 @@ const bsatn = @import("bsatn.zig");
 const types = @import("types.zig");
 const value_encoder = @import("value_encoder.zig");
 
-const HOST = "localhost:3000";
+/// Server under test: SPACETIMEDB_HOST (host:port) if set, else localhost:3000.
+fn host() []const u8 {
+    return std.testing.environ.getPosix("SPACETIMEDB_HOST") orelse "localhost:3000";
+}
 const DATABASE = "testmodule";
 
 /// Create an HTTP client using the StdHttpTransport.
 /// Caller must keep the returned transport alive for the client's lifetime.
 fn makeHttpClient(allocator: std.mem.Allocator, transport: *http_client.StdHttpTransport) http_client.Client {
     return http_client.Client.init(allocator, .{
-        .host = HOST,
+        .host = host(),
         .database = DATABASE,
     }, transport.transport());
 }
@@ -66,7 +69,7 @@ fn receiveFrame(allocator: std.mem.Allocator, transport: websocket.Transport, ma
 
 test "HTTP: Ping server" {
     const allocator = std.testing.allocator;
-    var transport = http_client.StdHttpTransport{};
+    var transport = http_client.StdHttpTransport{ .io = std.testing.io };
     var client = makeHttpClient(allocator, &transport);
     const ok = try client.ping();
     try std.testing.expect(ok);
@@ -81,7 +84,7 @@ test "HTTP: Fetch schema and verify structure" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var transport = http_client.StdHttpTransport{};
+    var transport = http_client.StdHttpTransport{ .io = std.testing.io };
     var client = makeHttpClient(allocator, &transport);
     const s = try client.fetchSchema();
 
@@ -111,7 +114,7 @@ test "HTTP: Fetch schema and verify structure" {
 
 test "HTTP: Create identity" {
     const allocator = std.testing.allocator;
-    var transport = http_client.StdHttpTransport{};
+    var transport = http_client.StdHttpTransport{ .io = std.testing.io };
     var client = makeHttpClient(allocator, &transport);
     const body = try client.createIdentity();
     defer allocator.free(body);
@@ -144,12 +147,12 @@ test "WebSocket: Connect and receive InitialConnection" {
     const allocator = std.testing.allocator;
 
     var conn = websocket.Connection.init(allocator, .{
-        .host = HOST,
+        .host = host(),
         .database = DATABASE,
     });
     defer conn.deinit();
 
-    try conn.connectReal();
+    try conn.connectReal(std.testing.io);
 
     // Read the first frame — should be InitialConnection
     const transport = conn.transport.?;
@@ -176,12 +179,12 @@ test "WebSocket: Subscribe to person table" {
     const allocator = std.testing.allocator;
 
     var conn = websocket.Connection.init(allocator, .{
-        .host = HOST,
+        .host = host(),
         .database = DATABASE,
     });
     defer conn.deinit();
 
-    try conn.connectReal();
+    try conn.connectReal(std.testing.io);
 
     // Read InitialConnection
     const transport = conn.transport.?;
@@ -205,8 +208,9 @@ test "WebSocket: Subscribe to person table" {
             switch (msg) {
                 .subscribe_applied => |sa| {
                     // We got initial rows (could be 0 or more)
-                    try std.testing.expect(sa.rows.len > 0);
-                    try std.testing.expectEqualStrings("person", sa.rows[0].table_name);
+                    if (sa.rows.len > 0) {
+                        try std.testing.expectEqualStrings("person", sa.rows[0].table_name);
+                    }
                     allocator.free(sa.rows);
                 },
                 else => return error.TestUnexpectedResult,
@@ -224,12 +228,12 @@ test "WebSocket: Call add_person reducer" {
     const allocator = std.testing.allocator;
 
     var conn = websocket.Connection.init(allocator, .{
-        .host = HOST,
+        .host = host(),
         .database = DATABASE,
     });
     defer conn.deinit();
 
-    try conn.connectReal();
+    try conn.connectReal(std.testing.io);
 
     const transport = conn.transport.?;
 
@@ -310,12 +314,12 @@ test "WebSocket: Call say_hello reducer" {
     const allocator = std.testing.allocator;
 
     var conn = websocket.Connection.init(allocator, .{
-        .host = HOST,
+        .host = host(),
         .database = DATABASE,
     });
     defer conn.deinit();
 
-    try conn.connectReal();
+    try conn.connectReal(std.testing.io);
 
     const transport = conn.transport.?;
 

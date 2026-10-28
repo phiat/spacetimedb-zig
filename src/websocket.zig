@@ -275,10 +275,10 @@ pub const Connection = struct {
     /// Connect to SpacetimeDB using a real WebSocket connection.
     /// Creates a WsTransport, performs the handshake, and wires it up.
     /// The WsTransport is heap-allocated and owned by this Connection.
-    pub fn connectReal(self: *Connection) !void {
+    pub fn connectReal(self: *Connection, io: std.Io) !void {
         const ws_transport = try self.allocator.create(WsTransport);
         errdefer self.allocator.destroy(ws_transport);
-        ws_transport.* = try WsTransport.connectFromConfig(self.allocator, self.config);
+        ws_transport.* = try WsTransport.connectFromConfig(io, self.allocator, self.config);
         self.connect(ws_transport.transport());
         self.owned_transport = ws_transport;
     }
@@ -324,13 +324,14 @@ pub const WsTransport = struct {
     /// `path` is the full path including query string.
     /// `token` is an optional JWT for authentication.
     pub fn connect(
+        io: std.Io,
         allocator: std.mem.Allocator,
         host: []const u8,
         port: u16,
         path: []const u8,
         token: ?[]const u8,
     ) !WsTransport {
-        var client = ws.Client.init(allocator, .{
+        var client = ws.Client.init(io, allocator, .{
             .port = port,
             .host = host,
         }) catch return error.ConnectionFailed;
@@ -352,7 +353,7 @@ pub const WsTransport = struct {
     }
 
     /// Connect using a Config struct (convenience).
-    pub fn connectFromConfig(allocator: std.mem.Allocator, config: Config) !WsTransport {
+    pub fn connectFromConfig(io: std.Io, allocator: std.mem.Allocator, config: Config) !WsTransport {
         // Parse host and port from config.host (e.g. "localhost:3000")
         const host_port = parseHostPort(config.host);
 
@@ -368,7 +369,7 @@ pub const WsTransport = struct {
         );
         defer allocator.free(path);
 
-        return connect(allocator, host_port.host, host_port.port, path, config.token);
+        return connect(io, allocator, host_port.host, host_port.port, path, config.token);
     }
 
     /// Set read timeout in milliseconds. Use 0 for no timeout (blocking).
@@ -499,8 +500,8 @@ const MockTransport = struct {
 
     fn init(allocator: std.mem.Allocator) MockTransport {
         return .{
-            .sent_data = .{},
-            .receive_queue = .{},
+            .sent_data = .empty,
+            .receive_queue = .empty,
             .is_open = true,
             .allocator = allocator,
         };
