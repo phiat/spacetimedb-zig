@@ -14,6 +14,7 @@
 // - Sums: u8 tag + payload
 
 const std = @import("std");
+const fuzz_input = @import("fuzz_input.zig");
 const types = @import("types.zig");
 
 const AlgebraicType = types.AlgebraicType;
@@ -48,7 +49,7 @@ pub const Encoder = struct {
     buf: std.ArrayListUnmanaged(u8),
 
     pub fn init() Encoder {
-        return .{ .buf = .{} };
+        return .{ .buf = .empty };
     }
 
     pub fn deinit(self: *Encoder, allocator: std.mem.Allocator) void {
@@ -730,7 +731,9 @@ test "fuzz decoder never crashes on arbitrary input" {
     });
 }
 
-fn fuzzDecoderRobustness(_: void, input: []const u8) anyerror!void {
+fn fuzzDecoderRobustness(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     // Property: the decoder must never crash/panic on any input.
     // It should either succeed or return a well-defined error.
     var dec = Decoder.init(input);
@@ -778,7 +781,9 @@ test "fuzz decodeValue product type never crashes" {
     });
 }
 
-fn fuzzDecodeValueProduct(_: void, input: []const u8) anyerror!void {
+fn fuzzDecodeValueProduct(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     const allocator = std.testing.allocator;
 
     const columns = [_]types.Column{
@@ -808,7 +813,9 @@ test "fuzz decodeValue option type never crashes" {
     });
 }
 
-fn fuzzDecodeValueOption(_: void, input: []const u8) anyerror!void {
+fn fuzzDecodeValueOption(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     const allocator = std.testing.allocator;
     const inner_type: AlgebraicType = .u32;
     const option_type: AlgebraicType = .{ .option = &inner_type };
@@ -830,7 +837,9 @@ test "fuzz decodeValue array type never crashes" {
     });
 }
 
-fn fuzzDecodeValueArray(_: void, input: []const u8) anyerror!void {
+fn fuzzDecodeValueArray(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     const allocator = std.testing.allocator;
     const inner: AlgebraicType = .u16;
     const array_type: AlgebraicType = .{ .array = &inner };
@@ -850,7 +859,9 @@ test "fuzz encode-decode roundtrip for u64" {
     });
 }
 
-fn fuzzRoundtripU64(_: void, input: []const u8) anyerror!void {
+fn fuzzRoundtripU64(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     if (input.len < 8) return;
     const allocator = std.testing.allocator;
 
@@ -877,7 +888,9 @@ test "fuzz encode-decode roundtrip for string" {
     });
 }
 
-fn fuzzRoundtripString(_: void, input: []const u8) anyerror!void {
+fn fuzzRoundtripString(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     const allocator = std.testing.allocator;
 
     var dec = Decoder.init(input);

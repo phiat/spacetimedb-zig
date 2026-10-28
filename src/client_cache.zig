@@ -222,7 +222,7 @@ pub const ClientCache = struct {
         self: *ClientCache,
         table_rows_list: []const TableRows,
     ) ![]RowChange {
-        var changes = std.ArrayListUnmanaged(RowChange){};
+        var changes = std.ArrayListUnmanaged(RowChange).empty;
         errdefer changes.deinit(self.allocator);
 
         for (table_rows_list) |tr| {
@@ -260,7 +260,7 @@ pub const ClientCache = struct {
         self: *ClientCache,
         query_sets: []const QuerySetUpdate,
     ) ![]RowChange {
-        var changes = std.ArrayListUnmanaged(RowChange){};
+        var changes = std.ArrayListUnmanaged(RowChange).empty;
         errdefer {
             // Free heap-allocated row copies in delete/update changes
             for (changes.items) |change| {
@@ -371,7 +371,7 @@ pub const ClientCache = struct {
                     // remove after iteration.
                     {
                         var rem_it = deleted_map.iterator();
-                        var keys_to_remove = std.ArrayListUnmanaged(PrimaryKey){};
+                        var keys_to_remove = std.ArrayListUnmanaged(PrimaryKey).empty;
                         defer keys_to_remove.deinit(self.allocator);
                         while (rem_it.next()) |entry| {
                             const del_row_ptr = try self.allocator.create(Row);

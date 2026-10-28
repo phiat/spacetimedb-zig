@@ -43,6 +43,13 @@ pub fn build(b: *std.Build) void {
                 },
             });
             if (do_brotli) {
+                // @cImport was removed in Zig 0.17; translate the header in the build instead.
+                const brotli_c = builder.addTranslateC(.{
+                    .root_source_file = builder.path("src/brotli_c.h"),
+                    .target = tgt,
+                    .optimize = opt,
+                });
+                mod.addImport("brotli_c", brotli_c.createModule());
                 mod.linkSystemLibrary("brotlidec", .{});
             }
             return mod;
@@ -96,9 +103,7 @@ pub fn build(b: *std.Build) void {
 
     const run_codegen = b.addRunArtifact(codegen_exe);
     run_codegen.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_codegen.addArgs(args);
-    }
+    run_codegen.addPassthruArgs();
     const codegen_step = b.step("codegen", "Generate Zig source from SpacetimeDB schema");
     codegen_step.dependOn(&run_codegen.step);
 

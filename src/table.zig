@@ -9,6 +9,7 @@
 //   const rows = try table.decodeTyped(Person, allocator, bsatn_data, columns);
 
 const std = @import("std");
+const fuzz_input = @import("fuzz_input.zig");
 const bsatn = @import("bsatn.zig");
 const types = @import("types.zig");
 const protocol = @import("protocol.zig");
@@ -57,9 +58,9 @@ pub fn fromRow(comptime T: type, row: *const Row) DecodeError!T {
     const info = @typeInfo(T).@"struct";
     var result: T = undefined;
 
-    inline for (info.fields) |field| {
-        const av = row.get(field.name) orelse return error.TypeMismatch;
-        @field(result, field.name) = try extractField(field.type, av);
+    inline for (info.field_names, info.field_types) |name, FieldType| {
+        const av = row.get(name) orelse return error.TypeMismatch;
+        @field(result, name) = try extractField(FieldType, av);
     }
 
     return result;
@@ -76,8 +77,8 @@ pub fn encodeRow(comptime T: type, allocator: std.mem.Allocator, value: T) ![]u8
 /// Free heap-allocated fields in a typed row (strings, slices).
 pub fn freeTypedRow(comptime T: type, allocator: std.mem.Allocator, row: *T) void {
     const info = @typeInfo(T).@"struct";
-    inline for (info.fields) |field| {
-        freeField(field.type, allocator, &@field(row, field.name));
+    inline for (info.field_names, info.field_types) |name, FieldType| {
+        freeField(FieldType, allocator, &@field(row, name));
     }
 }
 
@@ -96,17 +97,17 @@ fn decodeStruct(comptime T: type, allocator: std.mem.Allocator, dec: *Decoder) D
     var result: T = undefined;
     comptime var decoded_idx: usize = 0;
 
-    inline for (info.fields) |field| {
+    inline for (info.field_names, info.field_types) |name, FieldType| {
         errdefer {
             // Clean up previously decoded fields on error
             comptime var j: usize = 0;
-            inline for (info.fields) |prev_field| {
+            inline for (info.field_names, info.field_types) |prev_name, PrevType| {
                 if (j >= decoded_idx) break;
-                freeField(prev_field.type, allocator, &@field(result, prev_field.name));
+                freeField(PrevType, allocator, &@field(result, prev_name));
                 j += 1;
             }
         }
-        @field(result, field.name) = try decodeField(field.type, allocator, dec);
+        @field(result, name) = try decodeField(FieldType, allocator, dec);
         decoded_idx += 1;
     }
 
@@ -185,8 +186,8 @@ fn decodeField(comptime T: type, allocator: std.mem.Allocator, dec: *Decoder) De
 
 fn encodeStruct(comptime T: type, allocator: std.mem.Allocator, enc: *Encoder, value: T) !void {
     const info = @typeInfo(T).@"struct";
-    inline for (info.fields) |field| {
-        try encodeField(field.type, allocator, enc, @field(value, field.name));
+    inline for (info.field_names, info.field_types) |name, FieldType| {
+        try encodeField(FieldType, allocator, enc, @field(value, name));
     }
 }
 
@@ -309,8 +310,8 @@ fn freeField(comptime T: type, allocator: std.mem.Allocator, ptr: *T) void {
     }
     if (@typeInfo(T) == .@"struct") {
         const info = @typeInfo(T).@"struct";
-        inline for (info.fields) |field| {
-            freeField(field.type, allocator, &@field(ptr.*, field.name));
+        inline for (info.field_names, info.field_types) |name, FieldType| {
+            freeField(FieldType, allocator, &@field(ptr.*, name));
         }
         return;
     }
@@ -517,7 +518,9 @@ test "fuzz decodeRow comptime struct never crashes" {
     });
 }
 
-fn fuzzDecodeRowStruct(_: void, input: []const u8) anyerror!void {
+fn fuzzDecodeRowStruct(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     const allocator = std.testing.allocator;
 
     const FuzzPerson = struct {
@@ -549,7 +552,9 @@ test "fuzz decodeRow with optional field never crashes" {
     });
 }
 
-fn fuzzDecodeRowOptional(_: void, input: []const u8) anyerror!void {
+fn fuzzDecodeRowOptional(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [fuzz_input.max_len]u8 = undefined;
+    const input = fuzz_input.bytes(smith, &input_buf);
     const allocator = std.testing.allocator;
 
     const FuzzUser = struct {

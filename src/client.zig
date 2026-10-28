@@ -246,8 +246,8 @@ pub const SpacetimeClient = struct {
     }
 
     /// Connect to SpacetimeDB using a real WebSocket connection.
-    pub fn connectReal(self: *SpacetimeClient) !void {
-        try self.connection.connectReal();
+    pub fn connectReal(self: *SpacetimeClient, io: std.Io) !void {
+        try self.connection.connectReal(io);
     }
 
     /// Set read timeout on the underlying WebSocket transport.
@@ -667,7 +667,7 @@ test "SpacetimeClient subscribe tracking" {
         alloc: std.mem.Allocator,
 
         fn init(a: std.mem.Allocator) @This() {
-            return .{ .sent = .{}, .alloc = a };
+            return .{ .sent = .empty, .alloc = a };
         }
         fn deinitSelf(self: *@This()) void {
             for (self.sent.items) |d| self.alloc.free(d);

@@ -9,6 +9,9 @@ AGENTS.md
 zig-out/
 zig-cache/
 .zig-cache/
+zig-pkg/
+.zig-cache-*/
+zig-out-*/
 
 # Editor / IDE
 .vscode/

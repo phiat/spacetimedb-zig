@@ -12,17 +12,11 @@ const codegen = root.codegen;
 const schema_mod = root.schema;
 const http_client = root.http_client;
 
-const stdout_file = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
-const stderr_file = std.fs.File{ .handle = std.posix.STDERR_FILENO };
-const stdin_file = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var host: []const u8 = "localhost:3000";
     var database: ?[]const u8 = null;
@@ -43,7 +37,7 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--stdin")) {
             from_stdin = true;
         } else if (std.mem.eql(u8, args[i], "--help")) {
-            printUsage();
+            printUsage(io);
             return;
         }
     }
@@ -56,17 +50,19 @@ pub fn main() !void {
 
     if (from_stdin) {
         // Read JSON schema from stdin
-        const json = try stdin_file.readToEndAlloc(arena_alloc, 10 * 1024 * 1024);
+        var stdin_buf: [4096]u8 = undefined;
+        var stdin_reader = std.Io.File.stdin().readerStreaming(io, &stdin_buf);
+        const json = try stdin_reader.interface.allocRemaining(arena_alloc, .limited(10 * 1024 * 1024));
         s = try schema_mod.parse(arena_alloc, json);
     } else {
         // Fetch from HTTP
         const db = database orelse {
             std.debug.print("Error: --database is required (or use --stdin)\n", .{});
-            printUsage();
+            printUsage(io);
             std.process.exit(1);
         };
 
-        var http_transport = http_client.StdHttpTransport{};
+        var http_transport = http_client.StdHttpTransport{ .io = io };
         var client = http_client.Client.init(arena_alloc, .{
             .host = host,
             .database = db,
@@ -78,15 +74,16 @@ pub fn main() !void {
 
     // Write output
     if (std.mem.eql(u8, output, "-")) {
-        try stdout_file.writeAll(source);
+        try std.Io.File.stdout().writeStreamingAll(io, source);
     } else {
         // Ensure parent directory exists
+        const cwd = std.Io.Dir.cwd();
         if (std.fs.path.dirname(output)) |dir| {
-            std.fs.cwd().makePath(dir) catch {};
+            cwd.createDirPath(io, dir) catch {};
         }
-        const file = try std.fs.cwd().createFile(output, .{});
-        defer file.close();
-        try file.writeAll(source);
+        const file = try cwd.createFile(io, output, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, source);
         std.debug.print("Generated {s} ({d} tables, {d} reducers)\n", .{
             output,
             s.tables.len,
@@ -153,8 +150,8 @@ test "codegen from empty schema produces valid output" {
     try std.testing.expect(source.len > 0);
 }
 
-fn printUsage() void {
-    stderr_file.writeAll(
+fn printUsage(io: std.Io) void {
+    std.Io.File.stderr().writeStreamingAll(io,
         \\Usage: codegen [options]
         \\
         \\Options:

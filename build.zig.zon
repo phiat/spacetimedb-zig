@@ -2,15 +2,15 @@
     .name = .spacetimedb_zig,
     .version = "0.1.0",
     .fingerprint = 0xc7c3fc1d8d668711,
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .websocket = .{
-            .url = "https://github.com/karlseguin/websocket.zig/archive/97fefafa59cc78ce177cff540b8685cd7f699276.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdRlzAwBB_Bz2UMMqxYqF6YEVTIBoFsbzwPUJTHIc",
+            .url = "https://github.com/karlseguin/websocket.zig/archive/f2b3bad6875595e8dd42c726e8e914885a8b0ba0.tar.gz",
+            .hash = "websocket-0.1.0-ZPISdbERBQCnk2-UDVSJlOss6POs_aAJR2nrccYJ1wZm",
         },
         .zigcheck = .{
-            .url = "https://github.com/phiat/zigcheck/archive/refs/tags/v0.5.1.tar.gz",
-            .hash = "zigcheck-0.5.1-fuVit9HDAwCO6zm0PgZT_WOa8COsbYVwnDjS1ej1nqsE",
+            .url = "https://github.com/phiat/zigcheck/archive/refs/tags/v0.6.0.tar.gz",
+            .hash = "zigcheck-0.6.0-fuVit472AwDztKv8AWUyr63EcOg2Ltj3wY0q-2GcTZlu",
         },
     },
     .paths = .{
