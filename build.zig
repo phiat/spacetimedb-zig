@@ -66,7 +66,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
-
     // Tests
     const test_mod = mkRootMod(b, b.path("src/root.zig"), target, optimize, websocket_mod, build_options_mod, enable_brotli);
     test_mod.addImport("zigcheck", zigcheck_mod);
